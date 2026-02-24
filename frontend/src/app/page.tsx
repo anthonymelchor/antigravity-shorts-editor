@@ -44,10 +44,12 @@ export default function Home() {
   const [previewKey, setPreviewKey] = useState(0);
   const [showGuides, setShowGuides] = useState(true); // Default ON
   const playerRef = useRef<PlayerRef>(null);
+  const timelineRef = useRef<HTMLDivElement>(null);
 
   const [currentTime, setCurrentTime] = useState(0);
   const [activeSegmentIdx, setActiveSegmentIdx] = useState<number>(0);
   const [showTranscriptEditor, setShowTranscriptEditor] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
 
   useEffect(() => {
     checkInitialStatus();
@@ -220,10 +222,13 @@ export default function Home() {
     return 30;
   };
 
-  const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    playerRef.current?.seekTo(Math.round(((x / rect.width) * getDuration()) * 30));
+  const handleTimelineInteraction = (clientX: number) => {
+    if (!timelineRef.current) return;
+    const rect = timelineRef.current.getBoundingClientRect();
+    // Offset by 64px (w-16) which is the width of the track labels
+    const contentWidth = rect.width - 64;
+    const x = Math.max(0, Math.min(clientX - rect.left - 64, contentWidth));
+    playerRef.current?.seekTo(Math.round(((x / contentWidth) * getDuration()) * 30));
   };
 
   const inputProps = useMemo(() => {
@@ -322,10 +327,18 @@ export default function Home() {
               </div>
 
               {/* TRACKS CONTAINER */}
-              <div className="relative flex-1 flex flex-col gap-1 cursor-crosshair group" onClick={handleTimelineClick}>
-                {/* Global Playhead */}
-                <div className="absolute top-0 bottom-0 w-[2px] bg-red-600 z-[100] pointer-events-none shadow-[0_0_15px_rgba(220,38,38,1)] transition-none" style={{ left: `${(currentTime / getDuration()) * 100}%` }}>
-                  <div className="w-3 h-3 bg-red-600 rotate-45 absolute -top-1.5 -left-[5px] border border-red-300" />
+              <div
+                className="relative flex-1 flex flex-col gap-1 cursor-crosshair group touch-none"
+                ref={timelineRef}
+                onPointerDown={(e) => { setIsDragging(true); handleTimelineInteraction(e.clientX); e.currentTarget.setPointerCapture(e.pointerId); }}
+                onPointerMove={(e) => { if (isDragging) handleTimelineInteraction(e.clientX); }}
+                onPointerUp={(e) => { setIsDragging(false); e.currentTarget.releasePointerCapture(e.pointerId); }}
+              >
+                {/* Global Playhead (Offset by 64px to match content) */}
+                <div className="absolute top-0 bottom-0 left-16 right-0 pointer-events-none z-[100]">
+                  <div className="absolute top-0 bottom-0 w-[2px] bg-red-600 shadow-[0_0_15px_rgba(220,38,38,1)] transition-none" style={{ left: `${(currentTime / getDuration()) * 100}%` }}>
+                    <div className="w-4 h-4 bg-red-500 rounded-full absolute -top-2 -left-[7px] border-2 border-white shadow-[0_0_10px_rgba(239,68,68,0.8)]" />
+                  </div>
                 </div>
 
                 {/* TRACK 1: VFX & Emojis */}
@@ -414,28 +427,9 @@ export default function Home() {
                       </div>
                     </div>
                   </div>
-
-                  {/* Effects Manager */}
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between">
-                      <label className="text-[10px] font-black uppercase tracking-[0.4em] text-neutral-600">Action Events in Shot</label>
-                      <button onClick={removeVFXFromCurrentSegment} className="text-[8px] uppercase font-black text-red-400 hover:text-red-300">Clear VFX</button>
-                    </div>
-                    <div className="bg-black/20 rounded-[1.5rem] border border-white/5 p-4 space-y-2">
-                      {transcript.edit_events?.icons?.filter((i: any) => i.time >= transcript.framing_segments[activeSegmentIdx].start && i.time <= transcript.framing_segments[activeSegmentIdx].end).map((icon: any, idx: number) => (
-                        <div key={idx} className="flex justify-between items-center bg-white/5 px-4 py-3 rounded-xl"><span className="text-xs font-bold text-yellow-500 uppercase">Icon: {icon.keyword}</span><span className="text-[10px] font-mono text-neutral-600">{icon.time.toFixed(1)}s</span></div>
-                      ))}
-                      {transcript.edit_events?.zooms?.filter((z: any) => z.time >= transcript.framing_segments[activeSegmentIdx].start && z.time <= transcript.framing_segments[activeSegmentIdx].end).map((z: any, idx: number) => (
-                        <div key={idx} className="flex justify-between items-center bg-white/5 px-4 py-3 rounded-xl"><span className="text-xs font-bold text-blue-400 uppercase">Camera {z.type}</span><span className="text-[10px] font-mono text-neutral-600">{z.time.toFixed(1)}s</span></div>
-                      ))}
-                      {transcript.edit_events?.zooms?.filter((z: any) => z.time >= transcript.framing_segments[activeSegmentIdx].start && z.time <= transcript.framing_segments[activeSegmentIdx].end).length === 0 && transcript.edit_events?.icons?.filter((i: any) => i.time >= transcript.framing_segments[activeSegmentIdx].start && i.time <= transcript.framing_segments[activeSegmentIdx].end).length === 0 && (
-                        <div className="text-center p-4 text-[10px] font-bold text-neutral-600 uppercase">No VFX in this shot</div>
-                      )}
-                    </div>
-                  </div>
                 </div>
               ) : (
-                <div className="flex-1 flex items-center justify-center opacity-20"><Cpu className="w-16 h-16 animate-spin" /></div>
+                <div className="flex-1 flex items-center justify-center opacity-20"><Cpu className="w-16 h-16" /></div>
               )}
 
               <div className="mt-auto pt-16 space-y-8">
