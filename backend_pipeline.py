@@ -217,6 +217,91 @@ def detect_face_center_mediapipe(image_path):
 
 
 def analyze_framing_with_gemini(video_path, start_time, end_time):
+    # This function replaces Gemini with Local OpenCV + MediaPipe Tasks API
+    logger.info("Using local OpenCV + MediaPipe Tasks API for framing analysis (Cost: $0.00)...")
+    try:
+        import cv2
+        import mediapipe as mp
+    except ImportError:
+        logger.error("opencv-python or mediapipe not installed.")
+        return {"layout": "single", "center": 0.5, "framing_segments": [{"start": 0, "end": end_time - start_time, "center": 0.5}]}
+    
+    # Setup modern MediaPipe Face Detector
+    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blaze_face_short_range.tflite")
+    if not os.path.exists(model_path):
+        import urllib.request
+        logger.info("Downloading MediaPipe Face Model...")
+        urllib.request.urlretrieve("https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite", model_path)
+    
+    BaseOptions = mp.tasks.BaseOptions
+    FaceDetector = mp.tasks.vision.FaceDetector
+    FaceDetectorOptions = mp.tasks.vision.FaceDetectorOptions
+    
+    options = FaceDetectorOptions(
+        base_options=BaseOptions(model_asset_path=model_path),
+        min_detection_confidence=0.4
+    )
+    
+    segments = []
+    
+    with FaceDetector.create_from_options(options) as detector:
+        cap = cv2.VideoCapture(video_path)
+        cap.set(cv2.CAP_PROP_POS_MSEC, start_time * 1000)
+        
+        duration = end_time - start_time
+        sample_interval = 0.5
+        current_time_offset = 0.0
+        
+        last_center = 0.5
+        segment_start = 0.0
+        current_segment_center = 0.5
+        
+        while current_time_offset < duration:
+            ret, frame = cap.read()
+            if not ret: break
+                
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+            results = detector.detect(mp_image)
+            
+            detected_center = last_center
+            if results.detections:
+                best = max(results.detections, key=lambda d: d.categories[0].score)
+                bbox = best.bounding_box
+                img_w = mp_image.width
+                detected_center = (bbox.origin_x + bbox.width / 2.0) / img_w
+                
+                # Anti-jitter and cut detection
+                if abs(detected_center - last_center) > 0.15:
+                    if current_time_offset > 0:
+                        segments.append({"start": segment_start, "end": current_time_offset, "center": current_segment_center})
+                        segment_start = current_time_offset
+                        current_segment_center = detected_center
+                else:
+                    current_segment_center = (current_segment_center * 0.8) + (detected_center * 0.2)
+                    
+                last_center = detected_center
+                    
+            current_time_offset += sample_interval
+            cap.set(cv2.CAP_PROP_POS_MSEC, (start_time + current_time_offset) * 1000)
+            
+        cap.release()
+    
+    if len(segments) == 0:
+        segments.append({"start": 0.0, "end": duration, "center": current_segment_center})
+    else:
+        segments.append({"start": segment_start, "end": duration, "center": current_segment_center})
+        
+    logger.info(f"Local Framing generated {len(segments)} segments. (Cost: $0.00)")
+    
+    return {
+        "layout": "single", 
+        "center": segments[0]["center"] if segments else 0.5, 
+        "framing_segments": segments,
+        "reasoning": "Local OpenCV + MediaPipe Tasks API Analysis (0.00$ API COST)"
+    }
+
+def analyze_framing_with_gemini_old(video_path, start_time, end_time):
     logger.info("Extracting low-res video proxy for multimodal framing analysis (ASD)...")
     proxy_path = "framing_proxy.mp4"
     duration = end_time - start_time
@@ -273,7 +358,7 @@ def analyze_framing_with_gemini(video_path, start_time, end_time):
         
         time.sleep(10) # Pause to avoid rate limit
         response = client.models.generate_content(
-            model='gemini-2.0-flash', 
+            model='gemini-1.5-flash', 
             contents=[video_file, prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
@@ -296,7 +381,7 @@ def analyze_framing_with_gemini(video_path, start_time, end_time):
         # Final cleanup attempt
         if os.path.exists(proxy_path):
             os.remove(proxy_path)
-        return {"layout": "single", "center": 0.5}
+        return {"layout": "single", "center": 0.5, "center_top": 0.5, "center_bottom": 0.5, "reasoning": "AI Framing failed (Quota/429), using default centering."}
 
 def process_video_ffmpeg(input_path, output_path, start_time, end_time):
     print(f"Processing video with FFmpeg: extracting clip from {start_time}s to {end_time}s...")
@@ -309,13 +394,37 @@ def process_video_ffmpeg(input_path, output_path, start_time, end_time):
         "-i", input_path,
         "-t", str(duration),
         "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-g", "1",
+        "-keyint_min", "1",
+        "-r", "30",
         "-pix_fmt", "yuv420p",
+        "-profile:v", "high",
+        "-crf", "22",
         "-c:a", "aac",
+        "-b:a", "192k",
+        "-ar", "48000",
+        "-movflags", "+faststart",
         output_path
     ]
     
     subprocess.run(command, check=True)
     print(f"Processed video (raw clip) saved to {output_path}")
+
+    # Extract precise WAV audio to guarantee 0 audio stutters in Chromium/Remotion
+    audio_output = output_path.replace(".mp4", ".wav")
+    print(f"Extracting pristine Audio WAV track to {audio_output}...")
+    audio_cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", output_path,
+        "-vn",
+        "-c:a", "pcm_s16le",
+        "-ar", "44100",
+        "-ac", "2",
+        audio_output
+    ]
+    subprocess.run(audio_cmd, check=True)
     return output_path
 
 if __name__ == "__main__":
@@ -376,18 +485,19 @@ if __name__ == "__main__":
                     if 'time' in event:
                         event['time'] = max(0.0, float(event['time']) - start_time)
 
-        for broll in edit_events.get("b_rolls", []):
-            query = broll.get("query")
-            if query:
-                print(f">>> Searching B-roll for: {query}...")
-                url = search_pexels_videos(query)
-                if url:
-                    broll["url"] = url
-                    print(f"  [Pexels] Found: {url}")
+        # for broll in edit_events.get("b_rolls", []):
+        #     query = broll.get("query")
+        #     if query:
+        #         print(f">>> Searching B-roll for: {query}...")
+        #         url = search_pexels_videos(query)
+        #         if url:
+        #             broll["url"] = url
+        #             print(f"  [Pexels] Found: {url}")
 
         # 3.9 Prepare final transcript data for Remotion
         final_data = {
             "text": analysis.get("clip_text", ""),
+            "duration": end_time - start_time,
             "words": adjusted_words,
             "layout": framing_data.get("layout", "single"),
             "center": framing_data.get("center", 0.5),

@@ -49,8 +49,8 @@ export const ZoomManager: React.FC<ZoomManagerProps> = ({ children, zooms }) => 
             const baseScale = 1.02 + (intensity * 0.02); // e.g., 1.03
             const slowDrift = interpolate(localFrame, [0, fps * 10], [1, 1.02], { extrapolateRight: 'clamp' });
 
-            // Pan horizontally slowly - ROUND TO PIXELS TO AVOID JITTER
-            const x = Math.round(interpolate(localFrame, [0, fps * 10], [0, 15 * intensity], { extrapolateRight: 'clamp' }));
+            // Pan horizontally slowly - Use sub-pixel smoothing to avoid stuttering/jittering
+            const x = interpolate(localFrame, [0, fps * 10], [0, 15 * intensity], { extrapolateRight: 'clamp' });
 
             transform = `scale(${baseScale * slowDrift}) translate3d(${x}px, 0, 0)`;
         }

@@ -1,5 +1,4 @@
-import { AbsoluteFill, useCurrentFrame, useVideoConfig, spring, interpolate } from 'remotion';
-import transcriptData from './transcript_data.json';
+import { AbsoluteFill, useCurrentFrame, useVideoConfig, spring } from 'remotion';
 
 interface Word {
     word: string;
@@ -7,12 +6,20 @@ interface Word {
     end: number;
 }
 
-export const Subtitles: React.FC = () => {
+interface SubtitlesProps {
+    transcript: {
+        words: Word[];
+    };
+}
+
+export const Subtitles: React.FC<SubtitlesProps> = ({ transcript }) => {
     const frame = useCurrentFrame();
     const { fps } = useVideoConfig();
     const currentTime = frame / fps;
 
-    const currentWord = transcriptData.words.find(
+    if (!transcript || !transcript.words) return null;
+
+    const currentWord = transcript.words.find(
         (w: any) => currentTime >= w.start && currentTime <= w.end
     );
 
@@ -36,7 +43,7 @@ export const Subtitles: React.FC = () => {
                 alignItems: 'center',
                 top: '55%',
                 height: '25%',
-                pointerEvents: 'none'
+                pointerEvents: 'none',
             }}
         >
             <div
@@ -46,10 +53,11 @@ export const Subtitles: React.FC = () => {
                     fontWeight: '900',
                     textTransform: 'uppercase',
                     textAlign: 'center',
-                    textShadow: `4px 4px 0px black, -4px -4px 0px black, 4px -4px 0px black, -4px 4px 0px black, 0px 8px 15px rgba(0,0,0,0.8)`,
+                    textShadow: `4px 4px 0px black`,
                     padding: '20px',
                     lineHeight: '1',
                     fontFamily: '"Arial Black", sans-serif',
+                    transform: `scale(${scale.toFixed(4)}) translateZ(0)`,
                 }}
             >
                 {currentWord.word}
