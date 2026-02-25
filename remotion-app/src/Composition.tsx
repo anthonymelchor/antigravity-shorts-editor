@@ -118,7 +118,7 @@ export const Main: React.FC<MainProps> = ({ transcript: propTranscript, videoSrc
                     width: `${renderedVideoWidth}px`,
                     left: `${leftValue}px`,
                     top: `${yOffset}px`,
-                    // We remove transform from here to avoid conflicts with ZoomManager
+                    objectFit: 'cover', // ABSOLUTE REQUIREMENT FOR BROWSER PREVIEW MATCH
                 }}
             />
         );

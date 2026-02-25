@@ -234,10 +234,9 @@ export default function Home() {
   const inputProps = useMemo(() => {
     return {
       transcript,
-      videoSrcOverride: '/output_vertical_clip.mp4',
       isPlayer: true
     };
-  }, [transcript, showGuides]);
+  }, [transcript]);
 
   return (
     <main className="min-h-screen bg-[#020202] text-neutral-100 font-sans selection:bg-purple-500/30 overflow-hidden flex flex-col">
