@@ -8,6 +8,9 @@ export interface FramingSegment {
     start: number;
     end: number;
     center: number;
+    layout?: 'single' | 'split';
+    center_top?: number;
+    center_bottom?: number;
 }
 
 export interface Transcript {
@@ -18,6 +21,8 @@ export interface Transcript {
     framing_segments?: FramingSegment[];
     text: string;
     words: any[];
+    video_url?: string;
+    audio_url?: string;
     edit_events?: {
         zooms: any[];
         icons: any[];
@@ -47,36 +52,77 @@ export const Main: React.FC<MainProps> = ({ transcript: propTranscript, videoSrc
 
     const VideoComp = isPlayer ? Video : OffthreadVideo;
 
-    const layout = transcript.layout || 'single';
     const editEvents = transcript.edit_events || { zooms: [], icons: [], b_rolls: [], backgrounds: [] };
 
-    // Segmented Framing Logic
+    // --- DYNAMIC SEGMENTED FRAMING & LAYOUT ---
     let center = transcript.center ?? 0.5;
+    let layout: 'single' | 'split' = transcript.layout || 'single';
+    let centerTop = transcript.center_top ?? 0.5;
+    let centerBottom = transcript.center_bottom ?? 0.5;
+
     if (transcript.framing_segments && transcript.framing_segments.length > 0) {
         const activeSegment = transcript.framing_segments.find(
             s => currentTime >= s.start && currentTime < s.end
         );
         if (activeSegment) {
             center = activeSegment.center;
+            if (activeSegment.layout) layout = activeSegment.layout;
+            if (activeSegment.center_top !== undefined) centerTop = activeSegment.center_top;
+            if (activeSegment.center_bottom !== undefined) centerBottom = activeSegment.center_bottom;
         }
     }
 
-    const centerTop = transcript.center_top ?? 0.5;
-    const centerBottom = transcript.center_bottom ?? 0.5;
-
-    // MATH FOR FINAL 9:16 CROP
+    // --- FINAL RENDER MATH (9:16) ---
     const finalWidth = 1080;
     const finalHeight = 1920;
-    const currentVideoHeight = layout === 'split' ? finalHeight / 2 : finalHeight;
-    const videoWidth = currentVideoHeight * (16 / 9);
+
+    // Zoom factor: 1.0 is standard to avoid "over-zooming" in close-ups
+    const zoomFactor = 1.0;
+
+    // Calculate dimensions based on layout
+    const containerHeight = layout === 'split' ? finalHeight / 2 : finalHeight;
+    const renderedVideoHeight = containerHeight * zoomFactor;
+    const renderedVideoWidth = renderedVideoHeight * (16 / 9);
 
     const calculateVideoTranslation = (c: number) => {
-        const minTx = finalWidth - videoWidth;
-        return c * minTx;
+        // --- ABSOLUTE PIXEL-PERFECT CENTERING ---
+        // 1. Where is the subject in the video space?
+        const subjectX = c * renderedVideoWidth;
+
+        // 2. We want subjectX to be exactly at 540px
+        const screenCenterX = finalWidth / 2;
+        let offset = screenCenterX - subjectX;
+
+        // 3. Safety: Video must cover the 1080 width
+        const minOffset = finalWidth - renderedVideoWidth;
+        const maxOffset = 0;
+
+        return Math.max(minOffset, Math.min(maxOffset, offset));
     };
 
-    const videoSrc = videoSrcOverride || staticFile('output_vertical_clip.mp4');
-    const audioSrc = staticFile('output_vertical_clip.wav');
+    // Vertical offset - keep it at 0 to respect the original camera framing
+    const verticalOffset = 0;
+
+    const videoSrc = videoSrcOverride || (transcript.video_url ? staticFile(transcript.video_url) : staticFile('output_vertical_clip.mp4'));
+    const audioSrc = transcript.audio_url ? staticFile(transcript.audio_url) : staticFile('output_vertical_clip.wav');
+
+    const VideoLayer: React.FC<{ c: number, yOffset: number }> = ({ c, yOffset }) => {
+        const leftValue = calculateVideoTranslation(c);
+        return (
+            <VideoComp
+                src={videoSrc}
+                muted
+                style={{
+                    position: 'absolute',
+                    height: `${renderedVideoHeight}px`,
+                    width: `${renderedVideoWidth}px`,
+                    left: `${leftValue}px`,
+                    top: `${yOffset}px`,
+                    // We remove transform from here to avoid conflicts with ZoomManager
+                }}
+            />
+        );
+    };
 
     const renderFinalComposition = () => (
         <AbsoluteFill style={{ backgroundColor: '#000' }}>
@@ -84,15 +130,19 @@ export const Main: React.FC<MainProps> = ({ transcript: propTranscript, videoSrc
             <ZoomManager zooms={editEvents?.zooms || []}>
                 {layout === 'split' ? (
                     <AbsoluteFill>
+                        {/* TOP SECTION */}
                         <div style={{ position: 'absolute', top: 0, width: '100%', height: '50%', overflow: 'hidden' }}>
-                            <VideoComp src={videoSrc} muted style={{ position: 'absolute', height: '100%', width: `${videoWidth}px`, left: 0, transform: `translate3d(${calculateVideoTranslation(centerTop)}px, 0, 0)`, objectFit: 'cover' }} />
+                            <VideoLayer c={centerTop} yOffset={verticalOffset} />
                         </div>
+                        {/* BOTTOM SECTION */}
                         <div style={{ position: 'absolute', bottom: 0, width: '100%', height: '50%', overflow: 'hidden', borderTop: '4px solid rgba(255,255,255,0.2)' }}>
-                            <VideoComp src={videoSrc} muted style={{ position: 'absolute', height: '100%', width: `${videoWidth}px`, left: 0, transform: `translate3d(${calculateVideoTranslation(centerBottom)}px, 0, 0)`, objectFit: 'cover' }} />
+                            <VideoLayer c={centerBottom} yOffset={verticalOffset} />
                         </div>
                     </AbsoluteFill>
                 ) : (
-                    <VideoComp src={videoSrc} muted style={{ position: 'absolute', height: '100%', width: `${videoWidth}px`, left: 0, transform: `translate3d(${calculateVideoTranslation(center)}px, 0, 0)`, objectFit: 'cover' }} />
+                    <AbsoluteFill style={{ overflow: 'hidden' }}>
+                        <VideoLayer c={center} yOffset={verticalOffset} />
+                    </AbsoluteFill>
                 )}
             </ZoomManager>
             <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
@@ -108,9 +158,17 @@ export const Main: React.FC<MainProps> = ({ transcript: propTranscript, videoSrc
     }
 
     // --- WORKSPACE PANORAMA VIEW (1920x1080) ---
+    const RAW_WIDTH = 1920;
     const BOX_WIDTH = 1080 * (9 / 16); // 607.5
-    const MAX_X = 1920 - BOX_WIDTH;
-    const currentX = center * MAX_X;
+
+    // The subject's intended center in the 1920 panorama
+    const focalPointX = center * RAW_WIDTH;
+
+    // The box should be centered at focalPointX
+    let currentX = focalPointX - (BOX_WIDTH / 2);
+    // Clamp to keep box inside panorama
+    currentX = Math.max(0, Math.min(RAW_WIDTH - BOX_WIDTH, currentX));
+
     const scaleFactor = 1080 / 1920;
 
     return (

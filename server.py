@@ -31,7 +31,7 @@ BASE_DIR = os.getcwd()
 TRANSCRIPT_PATH = os.path.join(BASE_DIR, "transcript_data.json")
 VIDEO_OUTPUT_PATH = os.path.join(BASE_DIR, "output_vertical_clip.mp4")
 PUBLIC_DIR = os.path.join(BASE_DIR, "frontend", "public")
-REMOTION_DIR = os.path.join(BASE_DIR, "frontend")
+REMOTION_DIR = os.path.join(BASE_DIR, "remotion-app")
 
 # State management
 class ProcessingState:
@@ -95,25 +95,45 @@ def run_pipeline(url: str):
         process.wait()
         
         if process.returncode == 0:
+            import time
+            version = int(time.time())
+            
             state.status = "completed"
             state.message = "Video processed successfully!"
             state.progress = 100
             
-            # Internal copy for persistence and engine sync
+            # Define versioned names
+            v_name = f"video_{version}.mp4"
+            a_name = f"audio_{version}.wav"
+            
+            # Update transcript_data.json with the new paths
             if os.path.exists(TRANSCRIPT_PATH):
+                with open(TRANSCRIPT_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                
+                data["video_url"] = v_name
+                data["audio_url"] = a_name
+                
+                with open(TRANSCRIPT_PATH, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                
+                # Copy synchronized files
                 shutil.copy(TRANSCRIPT_PATH, os.path.join(PUBLIC_DIR, "transcript_data.json"))
-                # SYNC TO ENGINE SOURCE
                 shutil.copy(TRANSCRIPT_PATH, os.path.join(REMOTION_DIR, "src", "transcript_data.json"))
+
             if os.path.exists(VIDEO_OUTPUT_PATH):
-                shutil.copy(VIDEO_OUTPUT_PATH, os.path.join(PUBLIC_DIR, "output_vertical_clip.mp4"))
-                # SYNC TO ENGINE SOURCE (public/static)
-                target_video = os.path.join(REMOTION_DIR, "public", "output_vertical_clip.mp4")
-                shutil.copy(VIDEO_OUTPUT_PATH, target_video)
+                shutil.copy(VIDEO_OUTPUT_PATH, os.path.join(PUBLIC_DIR, v_name))
+                shutil.copy(VIDEO_OUTPUT_PATH, os.path.join(REMOTION_DIR, "public", v_name))
 
             wav_path = VIDEO_OUTPUT_PATH.replace(".mp4", ".wav")
             if os.path.exists(wav_path):
-                shutil.copy(wav_path, os.path.join(PUBLIC_DIR, "output_vertical_clip.wav"))
-                shutil.copy(wav_path, os.path.join(REMOTION_DIR, "public", "output_vertical_clip.wav"))
+                shutil.copy(wav_path, os.path.join(PUBLIC_DIR, a_name))
+                shutil.copy(wav_path, os.path.join(REMOTION_DIR, "public", a_name))
+                print(f"Version {version} synced successfully.")
+            
+            # Write to pipeline.log that processing is done
+            with open("pipeline.log", "a") as logf:
+                logf.write(f"\n[{time.ctime()}] PIPELINE COMPLETED SUCCESSFULLY\n")
         else:
             state.status = "failed"
             state.message = "Pipeline failed."
@@ -202,36 +222,51 @@ async def render_video(background_tasks: BackgroundTasks):
             state.progress = 5
             
             # SYNC FILES BEFORE RENDER
+            with open(TRANSCRIPT_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            v_name = data.get("video_url", "output_vertical_clip.mp4")
+            a_name = data.get("audio_url", "output_vertical_clip.wav")
+
             # 1. Transcript to Remotion src
             shutil.copy(TRANSCRIPT_PATH, os.path.join(REMOTION_DIR, "src", "transcript_data.json"))
-            # 2. Video to Remotion public (Static Files folder)
+            
+            # 2. Media to Remotion public
             remotion_public = os.path.join(REMOTION_DIR, "public")
             if not os.path.exists(remotion_public):
                 os.makedirs(remotion_public)
-            shutil.copy(VIDEO_OUTPUT_PATH, os.path.join(remotion_public, "output_vertical_clip.mp4"))
+                
+            shutil.copy(VIDEO_OUTPUT_PATH, os.path.join(remotion_public, v_name))
+            
+            wav_path = VIDEO_OUTPUT_PATH.replace(".mp4", ".wav")
+            if os.path.exists(wav_path):
+                shutil.copy(wav_path, os.path.join(remotion_public, a_name))
             
             state.message = "Running Remotion Build..."
             state.progress = 20
             
-            # Run npm run build
-            # Using shell=True for Windows compatibility with npm
-            process = subprocess.Popen(
-                ["npm", "run", "build"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                cwd=REMOTION_DIR,
-                shell=True
-            )
-            
-            for line in process.stdout:
-                out = line.strip()
-                if out: print(f"[Remotion] {out}")
-                if "Rendering" in line:
-                    state.progress = 50
-                    state.message = "Rendering frames..."
-            
-            process.wait()
+            with open("pipeline.log", "a") as logf:
+                logf.write(f"\n[{time.ctime()}] STARTING REMOTION RENDER\n")
+                process = subprocess.Popen(
+                    ["npm", "run", "build"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    cwd=REMOTION_DIR,
+                    shell=True
+                )
+                
+                for line in process.stdout:
+                    out = line.strip()
+                    if out: 
+                        print(f"[Remotion] {out}")
+                        logf.write(f"[Remotion] {line}")
+                        logf.flush()
+                    if "Rendering" in line:
+                        state.progress = 50
+                        state.message = "Rendering frames..."
+                
+                process.wait()
             
             if process.returncode == 0:
                 state.status = "completed"

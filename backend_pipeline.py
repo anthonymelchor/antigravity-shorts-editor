@@ -217,181 +217,160 @@ def detect_face_center_mediapipe(image_path):
 
 
 def analyze_framing_with_gemini(video_path, start_time, end_time):
-    # This function uses Local OpenCV + MediaPipe Object Detector for Person Detection
-    logger.info("Using local OpenCV + MediaPipe Object Detector (Person Detection Mode)...")
+    """Refactored Scene-Based Framing for high precision and scalability."""
+    logger.info("Starting Scene-Based Framing Analysis...")
     try:
         import cv2
         import mediapipe as mp
     except ImportError:
-        logger.error("opencv-python or mediapipe not installed.")
         return {"layout": "single", "center": 0.5, "framing_segments": [{"start": 0, "end": end_time - start_time, "center": 0.5, "layout": "single"}]}
-    
-    # Setup MediaPipe Object Detector (People)
+
     model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "efficientdet_lite0.tflite")
-    if not os.path.exists(model_path):
-        import urllib.request
-        logger.info("Downloading MediaPipe Person Detection Model...")
-        urllib.request.urlretrieve("https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite", model_path)
-    
-    BaseOptions = mp.tasks.BaseOptions
-    ObjectDetector = mp.tasks.vision.ObjectDetector
-    ObjectDetectorOptions = mp.tasks.vision.ObjectDetectorOptions
-    
-    options = ObjectDetectorOptions(
-        base_options=BaseOptions(model_asset_path=model_path),
+    detector_options = mp.tasks.vision.ObjectDetectorOptions(
+        base_options=mp.tasks.BaseOptions(model_asset_path=model_path),
         score_threshold=0.3
     )
     
-    segments = []
-    duration = end_time - start_time
+    face_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blaze_face_short_range.tflite")
+    face_options = mp.tasks.vision.FaceDetectorOptions(
+        base_options=mp.tasks.BaseOptions(model_asset_path=face_model_path),
+        min_detection_confidence=0.4
+    )
+
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    cap.set(cv2.CAP_PROP_POS_MSEC, start_time * 1000)
     
-    with ObjectDetector.create_from_options(options) as detector:
-        cap = cv2.VideoCapture(video_path)
-        cap.set(cv2.CAP_PROP_POS_MSEC, start_time * 1000)
-        
-        sample_interval = 0.1 # Faster reaction for perfect cuts
-        current_time_offset = 0.0
-        segment_start = 0.0
-        
-        # "Memory" to handle frames with 0 people (avoid jumping to logos)
-        last_valid_data = {
-            "layout": "single",
-            "center": 0.5,
-            "center_top": 0.5,
-            "center_bottom": 0.5
-        }
-        
-        while current_time_offset < duration:
+    total_frames = int((end_time - start_time) * fps)
+    
+    segments = []
+    last_hsv_hist = None
+    
+    # 1. FRAME-BY-FRAME SCENE DETECTION (Super Fast)
+    logger.info(f"Scanning {total_frames} frames for hard cuts and analyzing actors...")
+    
+    with mp.tasks.vision.ObjectDetector.create_from_options(detector_options) as detector, \
+         mp.tasks.vision.FaceDetector.create_from_options(face_options) as face_detector:
+        for frame_idx in range(total_frames):
             ret, frame = cap.read()
             if not ret: break
+            
+            # Histogram comparison
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            hist = cv2.calcHist([hsv], [0, 1], None, [180, 256], [0, 180, 0, 256])
+            cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+            
+            is_hard_cut = False
+            if last_hsv_hist is not None:
+                correlation = cv2.compareHist(last_hsv_hist, hist, cv2.HISTCMP_CORREL)
+                if correlation < 0.85: # Hard switch detected
+                    is_hard_cut = True
+            
+            # Analyze ONLY if it's the first frame of a scene or we need a sample
+            if frame_idx == 0 or is_hard_cut:
+                if segments:
+                    segments[-1]["end"] = frame_idx / fps
                 
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-            results = detector.detect(mp_image)
-            
-            # Filter detections for humans
-            people = [d for d in results.detections if d.categories[0].category_name == 'person']
-            
-            # Use memory as baseline
-            current_data = last_valid_data.copy()
-            
-            if len(people) >= 2:
-                # POTENTIAL SPOONFEED: Split mode
-                # Sort by confidence, then by horizontal position
-                people = sorted(people, key=lambda d: d.categories[0].score, reverse=True)
+                # RUN AI ONLY HERE
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
                 
-                # Determine layout with stricter rules to avoid false split-screens
+                # Use frame shape for dimensions
+                h_f, w_f = frame.shape[:2]
+                
+                # Run detectors
+                person_results = detector.detect(mp_image)
+                face_results = face_detector.detect(mp_image)
+                
+                people = [d for d in person_results.detections if d.categories[0].category_name == 'person']
+                faces = face_results.detections
+                
                 layout = "single"
-                frame_width = mp_image.width
-                
-                # Ensure there are at least two people to consider split
-                if len(people) >= 2:
-                    # Check if the second person is real (confidence) and at a different position
-                    p1 = people[0]
-                    p2 = people[1]
-                    p1_x = (p1.bounding_box.origin_x + p1.bounding_box.width/2) / frame_width
-                    p2_x = (p2.bounding_box.origin_x + p2.bounding_box.width/2) / frame_width
+                center = 0.5
+                center_top = 0.5
+                center_bottom = 0.5
+
+                if len(faces) >= 2:
+                    sorted_faces = sorted(faces, key=lambda f: f.bounding_box.origin_x)
+                    f1_center = (sorted_faces[0].bounding_box.origin_x + sorted_faces[0].bounding_box.width/2) / w_f
+                    f2_center = (sorted_faces[1].bounding_box.origin_x + sorted_faces[1].bounding_box.width/2) / w_f
                     
-                    # Split only if second person has good confidence and is at least 15% away from p1
-                    if p2.categories[0].score > 0.45 and abs(p1_x - p2_x) > 0.15:
+                    layout = "split"
+                    center_top = f1_center
+                    center_bottom = f2_center
+                    center = f1_center 
+                elif len(faces) == 1:
+                    center = (faces[0].bounding_box.origin_x + faces[0].bounding_box.width/2) / w_f
+                elif len(people) >= 1:
+                    p_sorted = sorted(people, key=lambda d: d.categories[0].score, reverse=True)
+                    center = (p_sorted[0].bounding_box.origin_x + p_sorted[0].bounding_box.width/2) / w_f
+                    if len(people) >= 2:
                         layout = "split"
+                        p1_x = (people[0].bounding_box.origin_x + people[0].bounding_box.width/2) / w_f
+                        p2_x = (people[1].bounding_box.origin_x + people[1].bounding_box.width/2) / w_f
+                        center_top = p1_x
+                        center_bottom = p2_x
 
-                current_data = {
-                    "layout": layout,
-                    "center": (people[0].bounding_box.origin_x + people[0].bounding_box.width/2) / frame_width if people else 0.5,
-                    "center_top": (people[0].bounding_box.origin_x + people[0].bounding_box.width/2) / frame_width if people else 0.5,
-                    "center_bottom": (people[1].bounding_box.origin_x + people[1].bounding_box.width/2) / frame_width if len(people) >= 2 else 0.5
-                }
-                current_data["center"] = (current_data["center_top"] + current_data["center_bottom"]) / 2
-                last_valid_data = current_data
-                
-            elif len(people) == 1:
-                # Single mode
-                bbox = people[0].bounding_box
-                img_w = mp_image.width
-                current_data["layout"] = "single"
-                current_data["center"] = (bbox.origin_x + bbox.width / 2.0) / img_w
-                last_valid_data = current_data
-            else:
-                # 0 people detected: Keep previous frame's layout (Memory Logic)
-                pass
-
-            # --- SMOOTHING ENGINE ---
-            # Rolling Average window
-            window_size = 5
-            if not hasattr(analyze_framing_with_gemini, "history"):
-                analyze_framing_with_gemini.history = []
-            
-            analyze_framing_with_gemini.history.append(current_data)
-            if len(analyze_framing_with_gemini.history) > window_size:
-                analyze_framing_with_gemini.history.pop(0)
-            
-            # Weighted average (more weight to recent)
-            hist = analyze_framing_with_gemini.history
-            smooth_data = current_data.copy()
-            sw = sum(range(1, len(hist) + 1))
-            
-            avg_c = sum(h["center"] * (i+1) for i, h in enumerate(hist)) / sw
-            avg_ct = sum(h.get("center_top", 0.5) * (i+1) for i, h in enumerate(hist)) / sw
-            avg_cb = sum(h.get("center_bottom", 0.5) * (i+1) for i, h in enumerate(hist)) / sw
-            
-            # Layout logic: Use majority vote in window to prevent layout flickering
-            layouts = [h["layout"] for h in hist]
-            smooth_data["layout"] = max(set(layouts), key=layouts.count)
-            smooth_data["center"] = avg_c
-            smooth_data["center_top"] = avg_ct
-            smooth_data["center_bottom"] = avg_cb
-
-            # Update framing segments list
-            if not segments:
                 segments.append({
-                    "start": segment_start,
-                    "end": current_time_offset + sample_interval,
-                    "layout": smooth_data["layout"],
-                    "center": smooth_data["center"],
-                    "center_top": smooth_data.get("center_top", 0.5),
-                    "center_bottom": smooth_data.get("center_bottom", 0.5)
+                    "start": frame_idx / fps,
+                    "end": (frame_idx + 1) / fps,
+                    "layout": layout,
+                    "center": center,
+                    "center_top": center_top,
+                    "center_bottom": center_bottom
                 })
-            else:
-                prev = segments[-1]
-                layout_changed = prev["layout"] != smooth_data["layout"]
-                # Major movement (cut detection)
-                pos_changed = abs(prev["center"] - smooth_data["center"]) > 0.12 
                 
-                if layout_changed or pos_changed:
-                    # Finalize current segment and start new one
-                    segments[-1]["end"] = current_time_offset
-                    segments.append({
-                        "start": current_time_offset,
-                        "end": current_time_offset + sample_interval,
-                        "layout": smooth_data["layout"],
-                        "center": smooth_data["center"],
-                        "center_top": smooth_data.get("center_top", 0.5),
-                        "center_bottom": smooth_data.get("center_bottom", 0.5)
-                    })
-                else:
-                    # Extend current segment
-                    segments[-1]["end"] = current_time_offset + sample_interval
-            
-            current_time_offset += sample_interval
-            cap.set(cv2.CAP_PROP_POS_MSEC, (start_time + current_time_offset) * 1000)
-            
-        cap.release()
+                if is_hard_cut:
+                    logger.info(f"  [Cut] Detected at {(start_time + frame_idx/fps):.3f}s. Layout: {layout} | Center: {center:.2f}")
+
+            else:
+                # Just extend current segment
+                segments[-1]["end"] = (frame_idx + 1) / fps
+                
+            last_hsv_hist = hist
+
+    cap.release()
     
     if not segments:
-        segments.append({"start": 0.0, "end": duration, "center": 0.5, "layout": "single"})
+        segments.append({"start": 0.0, "end": end_time - start_time, "center": 0.5, "layout": "single"})
     else:
-        segments[-1]["end"] = duration # Ensure last segment reaches the end
-        
-    logger.info(f"Local Person Tracking generated {len(segments)} segments.")
+        # --- SMART SEGMENT MERGING (PRO VERSION) ---
+        # Reduce timeline noise by merging visually similar segments
+        merged = []
+        if segments:
+            current = segments[0]
+            for i in range(1, len(segments)):
+                next_seg = segments[i]
+                
+                # Conditions for merging:
+                # 1. Same layout (single == single)
+                # 2. Similar centering (less than 10% difference)
+                layout_same = next_seg["layout"] == current["layout"]
+                center_similar = abs(next_seg["center"] - current["center"]) < 0.10
+                
+                # If it's a split, check both centers
+                if current["layout"] == "split":
+                    ct_same = abs(next_seg["center_top"] - current["center_top"]) < 0.10
+                    cb_same = abs(next_seg["center_bottom"] - current["center_bottom"]) < 0.10
+                    center_similar = ct_same and cb_same
+
+                if layout_same and center_similar:
+                    # Extend current segment instead of creating a new one
+                    current["end"] = next_seg["end"]
+                else:
+                    merged.append(current)
+                    current = next_seg
+            merged.append(current)
+            segments = merged
     
+    logger.info(f"High-Precision Analysis Complete. Identified {len(segments)} clean segments after merging.")
     return {
         "layout": segments[0]["layout"], 
         "center": segments[0]["center"], 
         "center_top": segments[0].get("center_top", 0.5),
         "center_bottom": segments[0].get("center_bottom", 0.5),
         "framing_segments": segments,
-        "reasoning": "Local OpenCV + MediaPipe Object Detector (Person Tracking Mode)"
+        "reasoning": f"Scene-First Framer ({len(segments)} cuts found)"
     }
 
 def analyze_framing_with_gemini_old(video_path, start_time, end_time):
@@ -477,36 +456,29 @@ def analyze_framing_with_gemini_old(video_path, start_time, end_time):
         return {"layout": "single", "center": 0.5, "center_top": 0.5, "center_bottom": 0.5, "reasoning": "AI Framing failed (Quota/429), using default centering."}
 
 def process_video_ffmpeg(input_path, output_path, start_time, end_time):
-    print(f"Processing video with FFmpeg: extracting clip from {start_time}s to {end_time}s...")
+    logger.info(f"Extracting LOSSLESS clip: {start_time}s to {end_time}s...")
     duration = float(end_time) - float(start_time)
     
     command = [
-        "ffmpeg",
-        "-y",
+        "ffmpeg", "-y",
         "-ss", str(start_time),
         "-i", input_path,
         "-t", str(duration),
         "-c:v", "libx264",
+        "-crf", "17", # HIGH QUALITY (Visually Lossless)
         "-preset", "ultrafast",
-        "-g", "1",
-        "-keyint_min", "1",
-        "-r", "30",
         "-pix_fmt", "yuv420p",
-        "-profile:v", "high",
-        "-crf", "22",
         "-c:a", "aac",
         "-b:a", "192k",
-        "-ar", "48000",
-        "-movflags", "+faststart",
         output_path
     ]
     
     subprocess.run(command, check=True)
-    print(f"Processed video (raw clip) saved to {output_path}")
+    logger.info(f"Lossless clip saved to {output_path}")
 
     # Extract precise WAV audio to guarantee 0 audio stutters in Chromium/Remotion
     audio_output = output_path.replace(".mp4", ".wav")
-    print(f"Extracting pristine Audio WAV track to {audio_output}...")
+    logger.info(f"Extracting pristine Audio WAV track to {audio_output}...")
     audio_cmd = [
         "ffmpeg",
         "-y",
@@ -606,11 +578,16 @@ if __name__ == "__main__":
 
         # 4. Crop and Cut
         # We produce a wide clip (raw clip) and let Remotion handle the cropping.
-        process_video_ffmpeg("input_full.mp4", "output_vertical_clip.mp4", start_time, end_time)
+        output_path = "output_vertical_clip.mp4"
+        process_video_ffmpeg("input_full.mp4", output_path, start_time, end_time)
         
-        print("Backend processing pipeline complete! Next step: Remotion for layout.")
+        logger.info("Backend processing pipeline complete! Success.")
+        # Force flush log
+        for l in logger.handlers:
+            l.flush()
 
         
     except Exception as e:
+        logger.exception("CRITICAL ERROR: Pipeline failed dramatically.")
         print(f"Pipeline failed: {str(e)}")
         sys.exit(1)
