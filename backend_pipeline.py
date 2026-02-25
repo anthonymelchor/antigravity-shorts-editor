@@ -217,44 +217,49 @@ def detect_face_center_mediapipe(image_path):
 
 
 def analyze_framing_with_gemini(video_path, start_time, end_time):
-    # This function replaces Gemini with Local OpenCV + MediaPipe Tasks API
-    logger.info("Using local OpenCV + MediaPipe Tasks API for framing analysis (Cost: $0.00)...")
+    # This function uses Local OpenCV + MediaPipe Object Detector for Person Detection
+    logger.info("Using local OpenCV + MediaPipe Object Detector (Person Detection Mode)...")
     try:
         import cv2
         import mediapipe as mp
     except ImportError:
         logger.error("opencv-python or mediapipe not installed.")
-        return {"layout": "single", "center": 0.5, "framing_segments": [{"start": 0, "end": end_time - start_time, "center": 0.5}]}
+        return {"layout": "single", "center": 0.5, "framing_segments": [{"start": 0, "end": end_time - start_time, "center": 0.5, "layout": "single"}]}
     
-    # Setup modern MediaPipe Face Detector
-    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blaze_face_short_range.tflite")
+    # Setup MediaPipe Object Detector (People)
+    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "efficientdet_lite0.tflite")
     if not os.path.exists(model_path):
         import urllib.request
-        logger.info("Downloading MediaPipe Face Model...")
-        urllib.request.urlretrieve("https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite", model_path)
+        logger.info("Downloading MediaPipe Person Detection Model...")
+        urllib.request.urlretrieve("https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite", model_path)
     
     BaseOptions = mp.tasks.BaseOptions
-    FaceDetector = mp.tasks.vision.FaceDetector
-    FaceDetectorOptions = mp.tasks.vision.FaceDetectorOptions
+    ObjectDetector = mp.tasks.vision.ObjectDetector
+    ObjectDetectorOptions = mp.tasks.vision.ObjectDetectorOptions
     
-    options = FaceDetectorOptions(
+    options = ObjectDetectorOptions(
         base_options=BaseOptions(model_asset_path=model_path),
-        min_detection_confidence=0.4
+        score_threshold=0.3
     )
     
     segments = []
+    duration = end_time - start_time
     
-    with FaceDetector.create_from_options(options) as detector:
+    with ObjectDetector.create_from_options(options) as detector:
         cap = cv2.VideoCapture(video_path)
         cap.set(cv2.CAP_PROP_POS_MSEC, start_time * 1000)
         
-        duration = end_time - start_time
-        sample_interval = 0.5
+        sample_interval = 0.1 # Faster reaction for perfect cuts
         current_time_offset = 0.0
-        
-        last_center = 0.5
         segment_start = 0.0
-        current_segment_center = 0.5
+        
+        # "Memory" to handle frames with 0 people (avoid jumping to logos)
+        last_valid_data = {
+            "layout": "single",
+            "center": 0.5,
+            "center_top": 0.5,
+            "center_bottom": 0.5
+        }
         
         while current_time_offset < duration:
             ret, frame = cap.read()
@@ -264,41 +269,129 @@ def analyze_framing_with_gemini(video_path, start_time, end_time):
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
             results = detector.detect(mp_image)
             
-            detected_center = last_center
-            if results.detections:
-                best = max(results.detections, key=lambda d: d.categories[0].score)
-                bbox = best.bounding_box
-                img_w = mp_image.width
-                detected_center = (bbox.origin_x + bbox.width / 2.0) / img_w
+            # Filter detections for humans
+            people = [d for d in results.detections if d.categories[0].category_name == 'person']
+            
+            # Use memory as baseline
+            current_data = last_valid_data.copy()
+            
+            if len(people) >= 2:
+                # POTENTIAL SPOONFEED: Split mode
+                # Sort by confidence, then by horizontal position
+                people = sorted(people, key=lambda d: d.categories[0].score, reverse=True)
                 
-                # Anti-jitter and cut detection
-                if abs(detected_center - last_center) > 0.15:
-                    if current_time_offset > 0:
-                        segments.append({"start": segment_start, "end": current_time_offset, "center": current_segment_center})
-                        segment_start = current_time_offset
-                        current_segment_center = detected_center
+                # Determine layout with stricter rules to avoid false split-screens
+                layout = "single"
+                frame_width = mp_image.width
+                
+                # Ensure there are at least two people to consider split
+                if len(people) >= 2:
+                    # Check if the second person is real (confidence) and at a different position
+                    p1 = people[0]
+                    p2 = people[1]
+                    p1_x = (p1.bounding_box.origin_x + p1.bounding_box.width/2) / frame_width
+                    p2_x = (p2.bounding_box.origin_x + p2.bounding_box.width/2) / frame_width
+                    
+                    # Split only if second person has good confidence and is at least 15% away from p1
+                    if p2.categories[0].score > 0.45 and abs(p1_x - p2_x) > 0.15:
+                        layout = "split"
+
+                current_data = {
+                    "layout": layout,
+                    "center": (people[0].bounding_box.origin_x + people[0].bounding_box.width/2) / frame_width if people else 0.5,
+                    "center_top": (people[0].bounding_box.origin_x + people[0].bounding_box.width/2) / frame_width if people else 0.5,
+                    "center_bottom": (people[1].bounding_box.origin_x + people[1].bounding_box.width/2) / frame_width if len(people) >= 2 else 0.5
+                }
+                current_data["center"] = (current_data["center_top"] + current_data["center_bottom"]) / 2
+                last_valid_data = current_data
+                
+            elif len(people) == 1:
+                # Single mode
+                bbox = people[0].bounding_box
+                img_w = mp_image.width
+                current_data["layout"] = "single"
+                current_data["center"] = (bbox.origin_x + bbox.width / 2.0) / img_w
+                last_valid_data = current_data
+            else:
+                # 0 people detected: Keep previous frame's layout (Memory Logic)
+                pass
+
+            # --- SMOOTHING ENGINE ---
+            # Rolling Average window
+            window_size = 5
+            if not hasattr(analyze_framing_with_gemini, "history"):
+                analyze_framing_with_gemini.history = []
+            
+            analyze_framing_with_gemini.history.append(current_data)
+            if len(analyze_framing_with_gemini.history) > window_size:
+                analyze_framing_with_gemini.history.pop(0)
+            
+            # Weighted average (more weight to recent)
+            hist = analyze_framing_with_gemini.history
+            smooth_data = current_data.copy()
+            sw = sum(range(1, len(hist) + 1))
+            
+            avg_c = sum(h["center"] * (i+1) for i, h in enumerate(hist)) / sw
+            avg_ct = sum(h.get("center_top", 0.5) * (i+1) for i, h in enumerate(hist)) / sw
+            avg_cb = sum(h.get("center_bottom", 0.5) * (i+1) for i, h in enumerate(hist)) / sw
+            
+            # Layout logic: Use majority vote in window to prevent layout flickering
+            layouts = [h["layout"] for h in hist]
+            smooth_data["layout"] = max(set(layouts), key=layouts.count)
+            smooth_data["center"] = avg_c
+            smooth_data["center_top"] = avg_ct
+            smooth_data["center_bottom"] = avg_cb
+
+            # Update framing segments list
+            if not segments:
+                segments.append({
+                    "start": segment_start,
+                    "end": current_time_offset + sample_interval,
+                    "layout": smooth_data["layout"],
+                    "center": smooth_data["center"],
+                    "center_top": smooth_data.get("center_top", 0.5),
+                    "center_bottom": smooth_data.get("center_bottom", 0.5)
+                })
+            else:
+                prev = segments[-1]
+                layout_changed = prev["layout"] != smooth_data["layout"]
+                # Major movement (cut detection)
+                pos_changed = abs(prev["center"] - smooth_data["center"]) > 0.12 
+                
+                if layout_changed or pos_changed:
+                    # Finalize current segment and start new one
+                    segments[-1]["end"] = current_time_offset
+                    segments.append({
+                        "start": current_time_offset,
+                        "end": current_time_offset + sample_interval,
+                        "layout": smooth_data["layout"],
+                        "center": smooth_data["center"],
+                        "center_top": smooth_data.get("center_top", 0.5),
+                        "center_bottom": smooth_data.get("center_bottom", 0.5)
+                    })
                 else:
-                    current_segment_center = (current_segment_center * 0.8) + (detected_center * 0.2)
-                    
-                last_center = detected_center
-                    
+                    # Extend current segment
+                    segments[-1]["end"] = current_time_offset + sample_interval
+            
             current_time_offset += sample_interval
             cap.set(cv2.CAP_PROP_POS_MSEC, (start_time + current_time_offset) * 1000)
             
         cap.release()
     
-    if len(segments) == 0:
-        segments.append({"start": 0.0, "end": duration, "center": current_segment_center})
+    if not segments:
+        segments.append({"start": 0.0, "end": duration, "center": 0.5, "layout": "single"})
     else:
-        segments.append({"start": segment_start, "end": duration, "center": current_segment_center})
+        segments[-1]["end"] = duration # Ensure last segment reaches the end
         
-    logger.info(f"Local Framing generated {len(segments)} segments. (Cost: $0.00)")
+    logger.info(f"Local Person Tracking generated {len(segments)} segments.")
     
     return {
-        "layout": "single", 
-        "center": segments[0]["center"] if segments else 0.5, 
+        "layout": segments[0]["layout"], 
+        "center": segments[0]["center"], 
+        "center_top": segments[0].get("center_top", 0.5),
+        "center_bottom": segments[0].get("center_bottom", 0.5),
         "framing_segments": segments,
-        "reasoning": "Local OpenCV + MediaPipe Tasks API Analysis (0.00$ API COST)"
+        "reasoning": "Local OpenCV + MediaPipe Object Detector (Person Tracking Mode)"
     }
 
 def analyze_framing_with_gemini_old(video_path, start_time, end_time):
@@ -504,6 +597,7 @@ if __name__ == "__main__":
             "center_top": framing_data.get("center_top", 0.5),
             "center_bottom": framing_data.get("center_bottom", 0.5),
             "framing_reasoning": framing_data.get("reasoning", ""),
+            "framing_segments": framing_data.get("framing_segments", []),
             "edit_events": edit_events
         }
         

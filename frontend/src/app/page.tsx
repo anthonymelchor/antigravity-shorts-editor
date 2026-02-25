@@ -42,7 +42,7 @@ export default function Home() {
   });
   const [transcript, setTranscript] = useState<any>(null);
   const [previewKey, setPreviewKey] = useState(0);
-  const [showGuides, setShowGuides] = useState(true); // Default ON
+  const [showGuides, setShowGuides] = useState(false); // Forced OFF for 9:16 ONLY mode
   const playerRef = useRef<PlayerRef>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
 
@@ -235,7 +235,6 @@ export default function Home() {
     return {
       transcript,
       videoSrcOverride: '/output_vertical_clip.mp4',
-      isWorkspaceView: showGuides,
       isPlayer: true
     };
   }, [transcript, showGuides]);
@@ -272,11 +271,11 @@ export default function Home() {
         <div className="flex-1 flex flex-col bg-[#050505] border-r border-white/5 relative">
 
           <div className="flex-1 flex items-center justify-center p-8">
-            <div className={`aspect-video w-full max-w-5xl bg-black rounded-3xl overflow-hidden shadow-[0_0_120px_rgba(0,0,0,1)] border border-white/10 relative transition-all duration-500`}>
+            <div className={`h-[calc(100vh-360px)] aspect-[9/16] bg-black rounded-3xl overflow-hidden shadow-[0_0_120px_rgba(0,0,0,1)] border border-white/10 relative transition-all duration-500`}>
               {transcript ? (
                 <Player ref={playerRef} key={previewKey} component={Main} durationInFrames={Math.ceil(getDuration() * 30)}
-                  compositionWidth={showGuides ? 1920 : 1080}
-                  compositionHeight={showGuides ? 1080 : 1920}
+                  compositionWidth={1080}
+                  compositionHeight={1920}
                   fps={30} style={{ width: '100%', height: '100%' }} controls
                   inputProps={inputProps} />
               ) : (
@@ -295,17 +294,7 @@ export default function Home() {
               )}
             </div>
 
-            {/* View Mode Switcher */}
-            {transcript && (
-              <div className="absolute top-12 left-12 flex bg-black/80 backdrop-blur-3xl rounded-full border border-white/10 p-1 shadow-2xl">
-                <button onClick={() => setShowGuides(true)} className={`px-6 py-2 rounded-full text-[10px] font-black uppercase tracking-widest transition-all ${showGuides ? 'bg-purple-600 shadow-lg text-white' : 'text-neutral-600 hover:text-white'}`}>
-                  Panorama 16:9
-                </button>
-                <button onClick={() => setShowGuides(false)} className={`px-6 py-2 rounded-full text-[10px] font-black uppercase tracking-widest transition-all ${!showGuides ? 'bg-purple-600 shadow-lg text-white' : 'text-neutral-600 hover:text-white'}`}>
-                  Preview 9:16
-                </button>
-              </div>
-            )}
+            {/* View Mode Switcher Removed - Only 9:16 Output Mode is allowed now */}
 
             {transcript && (
               <div className="absolute top-12 right-12 flex flex-col gap-4">

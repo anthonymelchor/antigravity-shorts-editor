@@ -31,7 +31,7 @@ BASE_DIR = os.getcwd()
 TRANSCRIPT_PATH = os.path.join(BASE_DIR, "transcript_data.json")
 VIDEO_OUTPUT_PATH = os.path.join(BASE_DIR, "output_vertical_clip.mp4")
 PUBLIC_DIR = os.path.join(BASE_DIR, "frontend", "public")
-REMOTION_DIR = os.path.join(BASE_DIR, "remotion-app")
+REMOTION_DIR = os.path.join(BASE_DIR, "frontend")
 
 # State management
 class ProcessingState:
