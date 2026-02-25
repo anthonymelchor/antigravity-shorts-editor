@@ -1,57 +1,112 @@
-import { AbsoluteFill, useCurrentFrame, useVideoConfig, spring } from 'remotion';
+import React, { useMemo } from 'react';
+import { AbsoluteFill, useCurrentFrame, useVideoConfig } from 'remotion';
+import { loadFont } from '@remotion/google-fonts/Inter';
 import { Transcript } from './Composition';
+
+const { fontFamily } = loadFont();
 
 interface SubtitlesProps {
     transcript: Transcript;
+    currentLayout?: 'single' | 'split';
 }
 
-export const Subtitles: React.FC<SubtitlesProps> = ({ transcript }) => {
+export const Subtitles: React.FC<SubtitlesProps> = ({ transcript, currentLayout = 'single' }) => {
     const frame = useCurrentFrame();
     const { fps } = useVideoConfig();
     const currentTime = frame / fps;
 
-    const currentWord = transcript.words.find(
-        (w: any) => currentTime >= w.start && currentTime <= w.end
-    );
+    const words = transcript.words || [];
 
-    if (!currentWord) return null;
+    // --- CHUNKING LOGIC ---
+    // Group words into chunks of up to 4 words.
+    const chunks = useMemo(() => {
+        const result: any[][] = [];
+        let currentChunk: any[] = [];
+        for (let i = 0; i < words.length; i++) {
+            currentChunk.push(words[i]);
+            // Create a new chunk every 4 words, OR if it's the last word
+            if (currentChunk.length === 4 || i === words.length - 1) {
+                result.push(currentChunk);
+                currentChunk = [];
+            }
+        }
+        return result;
+    }, [words]);
 
-    const startFrame = currentWord.start * fps;
-    const scale = spring({
-        frame: frame - startFrame,
-        fps,
-        config: {
-            stiffness: 200,
-            damping: 10,
-            mass: 0.5
-        },
+    // Find the active chunk based on the current time
+    const activeChunk = chunks.find(chunk => {
+        const firstWordStart = chunk[0].start;
+        const lastWordEnd = chunk[chunk.length - 1].end;
+        return currentTime >= firstWordStart && currentTime <= lastWordEnd;
     });
 
+    if (!activeChunk) return null;
+
     return (
-        <AbsoluteFill
-            style={{
+        <AbsoluteFill style={{
+            justifyContent: currentLayout === 'split' ? 'center' : 'flex-end',
+            alignItems: 'center',
+            paddingBottom: currentLayout === 'split' ? '0px' : '300px', // Higher position for single mode
+            pointerEvents: 'none',
+        }}>
+            {/* Gradient Overlay Behind Text (Only in single mode to avoid cluttering the split center) */}
+            {currentLayout === 'single' && (
+                <div style={{
+                    position: 'absolute',
+                    bottom: 0,
+                    width: '100%',
+                    height: '40%',
+                    background: 'linear-gradient(to bottom, transparent, rgba(0,0,0,0.85))',
+                    zIndex: -1,
+                }} />
+            )}
+
+            <div style={{
+                display: 'flex',
+                flexWrap: 'wrap',
                 justifyContent: 'center',
                 alignItems: 'center',
-                top: '55%',
-                height: '25%',
-                pointerEvents: 'none',
-            }}
-        >
-            <div
-                style={{
-                    color: 'white',
-                    fontSize: '85px',
-                    fontWeight: '900',
-                    textTransform: 'uppercase',
-                    textAlign: 'center',
-                    textShadow: `4px 4px 0px black`,
-                    padding: '20px',
-                    lineHeight: '1',
-                    fontFamily: '"Arial Black", sans-serif',
-                    transform: `scale(${scale.toFixed(4)}) translateZ(0)`,
-                }}
-            >
-                {currentWord.word}
+                gap: '24px', // Word gap: 24pt ~ 24px
+                width: '80%',
+                textAlign: 'center',
+            }}>
+                {activeChunk.map((wordObj, i) => {
+                    // --- STYLING LOGIC ---
+                    const isPast = currentTime > wordObj.end;
+                    const isCurrent = currentTime >= wordObj.start && currentTime <= wordObj.end;
+
+                    let color = 'rgba(255, 255, 255, 0.5)'; // Future default
+                    let textShadow = '0 4px 20px rgba(0,0,0,0.8)'; // default text shadow
+                    let transform = 'scale(1)';
+
+                    if (isCurrent) {
+                        color = '#BFF549'; // Neon green
+                        textShadow = '0 0 40px rgba(191,245,73,0.8), 0 4px 20px rgba(0,0,0,0.8)'; // Glow effect
+                        transform = 'scale(1.1)'; // Scale 1.1 pop
+                    } else if (isPast) {
+                        color = '#FFFFFF'; // White for already spoken
+                    }
+
+                    return (
+                        <span
+                            key={i}
+                            style={{
+                                fontFamily,
+                                fontSize: '72px',
+                                fontWeight: 800,
+                                letterSpacing: '0.02em',
+                                color,
+                                textShadow,
+                                transform,
+                                transition: 'all 0.1s ease-out', // Smooth transition between states
+                                display: 'inline-block',
+                                lineHeight: '1.2',
+                            }}
+                        >
+                            {wordObj.word}
+                        </span>
+                    );
+                })}
             </div>
         </AbsoluteFill>
     );

@@ -147,7 +147,7 @@ export const Main: React.FC<MainProps> = ({ transcript: propTranscript, videoSrc
             </ZoomManager>
             <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
                 <DynamicLayer events={editEvents} />
-                <Subtitles transcript={transcript} />
+                <Subtitles transcript={transcript} currentLayout={layout} />
             </div>
         </AbsoluteFill>
     );

@@ -69,81 +69,83 @@ export const Main: React.FC<MainProps> = ({ transcript: propTranscript, videoSrc
 
     const editEvents = transcript.edit_events || { zooms: [], icons: [], b_rolls: [], backgrounds: [] };
 
+    // --- FINAL RENDER MATH (9:16) ---
     const finalWidth = 1080;
     const finalHeight = 1920;
 
-    const renderVideo = (c: number, containerHeight: number, opacity: number = 1) => {
-        // Safety Zoom (1.2x) gives us more 'room' to move and center people near the edges
-        const scale = 1.25;
-        const vHeight = containerHeight * scale;
-        const vWidth = vHeight * (16 / 9);
-        const focus = c ?? 0.5;
+    // Zoom factor: 1.0 is standard to avoid "over-zooming" in close-ups
+    const zoomFactor = 1.0;
 
-        // Centering math
-        const targetX = finalWidth / 2;
-        const currentFocusX = focus * vWidth;
-        let tx = targetX - currentFocusX;
+    // Calculate dimensions based on layout
+    const containerHeight = activeLayout === 'split' ? finalHeight / 2 : finalHeight;
+    const renderedVideoHeight = containerHeight * zoomFactor;
+    const renderedVideoWidth = renderedVideoHeight * (16 / 9);
 
-        // Clamp to edges (now with more room thanks to scale)
-        const minTx = finalWidth - vWidth;
-        const maxTx = 0;
-        const finalTx = Math.max(minTx, Math.min(maxTx, tx));
+    const calculateVideoTranslation = (c: number) => {
+        // --- ABSOLUTE PIXEL-PERFECT CENTERING ---
+        // 1. Where is the subject in the video space?
+        const subjectX = c * renderedVideoWidth;
 
-        // Vertical adjustment to center the person vertically in their slot
-        const ty = (containerHeight - vHeight) / 2;
+        // 2. We want subjectX to be exactly at 540px
+        const screenCenterX = finalWidth / 2;
+        let offset = screenCenterX - subjectX;
 
-        return (
-            <div style={{ position: 'absolute', inset: 0, overflow: 'hidden', opacity }}>
-                <VideoComp
-                    src={videoSrc}
-                    muted
-                    style={{
-                        position: 'absolute',
-                        height: `${vHeight}px`,
-                        width: `${vWidth}px`,
-                        left: 0,
-                        top: 0,
-                        transform: `translate3d(${finalTx}px, ${ty}px, 0)`,
-                        maxWidth: 'none',
-                        objectFit: 'cover',
-                    }}
-                />
-            </div>
-        );
+        // 3. Safety: Video must cover the 1080 width
+        const minOffset = finalWidth - renderedVideoWidth;
+        const maxOffset = 0;
+
+        return Math.max(minOffset, Math.min(maxOffset, offset));
     };
+
+    // Vertical offset - keep it at 0 to respect the original camera framing
+    const verticalOffset = 0;
 
     const videoSrc = videoSrcOverride || staticFile('output_vertical_clip.mp4');
     const audioSrc = staticFile('output_vertical_clip.wav');
 
-    // Centering logic: ALWAYS 0.5 for Single mode as requested.
-    // DYNAMIC focus for Split mode to center the subjects.
-    const finalActiveCenter = activeLayout === 'single' ? 0.5 : activeCenter;
+    const renderVideoLayer = (c: number, yOffset: number) => {
+        const leftValue = calculateVideoTranslation(c);
+        return (
+            <VideoComp
+                src={videoSrc}
+                muted
+                style={{
+                    position: 'absolute',
+                    height: `${renderedVideoHeight}px`,
+                    width: `${renderedVideoWidth}px`,
+                    left: `${leftValue}px`,
+                    top: `${yOffset}px`,
+                    objectFit: 'cover', // ABSOLUTE REQUIREMENT FOR BROWSER PREVIEW MATCH
+                    maxWidth: 'none', // Critical to override Tailwind/Next.js default max-width: 100%
+                }}
+            />
+        );
+    };
 
     return (
-        <AbsoluteFill style={{ backgroundColor: '#000', display: 'block' }}>
+        <AbsoluteFill style={{ backgroundColor: '#000' }}>
             <Audio src={audioSrc} />
             <ZoomManager zooms={editEvents?.zooms || []}>
-                <div style={{ position: 'absolute', inset: 0 }}>
-                    {activeLayout === 'split' ? (
-                        <div style={{ position: 'absolute', inset: 0 }}>
-                            {/* TOP SLOT (Person A) */}
-                            <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '50%', overflow: 'hidden' }}>
-                                {renderVideo(activeCenterTop, finalHeight / 2)}
-                            </div>
-                            {/* BOTTOM SLOT (Person B) */}
-                            <div style={{ position: 'absolute', bottom: 0, left: 0, width: '100%', height: '50%', overflow: 'hidden', borderTop: '4px solid rgba(255,255,255,0.4)' }}>
-                                {renderVideo(activeCenterBottom, finalHeight / 2)}
-                            </div>
+                {activeLayout === 'split' ? (
+                    <AbsoluteFill>
+                        {/* TOP SECTION */}
+                        <div style={{ position: 'absolute', top: 0, width: '100%', height: '50%', overflow: 'hidden' }}>
+                            {renderVideoLayer(activeCenterTop, verticalOffset)}
                         </div>
-                    ) : (
-                        /* FULL SCREEN (Person Focus Fixed at 50%) */
-                        renderVideo(finalActiveCenter, finalHeight)
-                    )}
-                </div>
+                        {/* BOTTOM SECTION */}
+                        <div style={{ position: 'absolute', bottom: 0, width: '100%', height: '50%', overflow: 'hidden', borderTop: '4px solid rgba(255,255,255,0.2)' }}>
+                            {renderVideoLayer(activeCenterBottom, verticalOffset)}
+                        </div>
+                    </AbsoluteFill>
+                ) : (
+                    <AbsoluteFill style={{ overflow: 'hidden' }}>
+                        {renderVideoLayer(activeCenter, verticalOffset)}
+                    </AbsoluteFill>
+                )}
             </ZoomManager>
             <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
                 <DynamicLayer events={editEvents} />
-                <Subtitles transcript={transcript} />
+                <Subtitles transcript={transcript} currentLayout={activeLayout} />
             </div>
         </AbsoluteFill>
     );

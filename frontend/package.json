@@ -9,14 +9,15 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@remotion/player": "^4.0.427",
+    "@remotion/google-fonts": "4.0.429",
+    "@remotion/player": "4.0.429",
     "clsx": "^2.1.1",
     "framer-motion": "^12.34.3",
     "lucide-react": "^0.575.0",
     "next": "16.1.6",
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "remotion": "^4.0.427",
+    "remotion": "4.0.429",
     "tailwind-merge": "^3.5.0",
     "zod": "^4.3.6"
   },
