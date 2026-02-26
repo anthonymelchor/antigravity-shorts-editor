@@ -32,41 +32,49 @@ if os.name == "nt":
         os.environ["PATH"] = ffmpeg_bin + os.pathsep + os.environ.get("PATH", "")
 
 def download_video(url, output_path):
-    print(f"Downloading video from {url}...")
-    ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'outtmpl': output_path,
-        'overwrites': True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-    print(f"Video downloaded to {output_path}")
-    return output_path
+    logger.info(f"Downloading video from {url}...")
+    try:
+        ydl_opts = {
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'outtmpl': output_path,
+            'overwrites': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+        logger.info(f"Video downloaded to {output_path}")
+        return output_path
+    except Exception as e:
+        logger.error(f"Failed to download video: {str(e)}")
+        raise e
 
 def transcribe_audio(video_path, model_size="base"):
-    print(f"Transcribing {video_path} using faster-whisper ({model_size} model)...")
-    # Run on CPU with INT8 representation for lower memory usage.
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    logger.info(f"Transcribing {video_path} using faster-whisper ({model_size} model)...")
+    try:
+        # Run on CPU with INT8 representation for lower memory usage.
+        model = WhisperModel(model_size, device="cpu", compute_type="int8")
 
-    segments, info = model.transcribe(video_path, beam_size=5, word_timestamps=True)
+        segments, info = model.transcribe(video_path, beam_size=5, word_timestamps=True)
 
-    print(f"Detected language '{info.language}' with probability {info.language_probability}")
+        logger.info(f"Detected language '{info.language}' with probability {info.language_probability}")
 
-    words = []
-    full_text = ""
-    for segment in segments:
-        full_text += segment.text + " "
-        for word in segment.words:
-            words.append({
-                "word": word.word.strip(),
-                "start": word.start,
-                "end": word.end
-            })
-            
-    return {
-        "text": full_text.strip(),
-        "words": words
-    }
+        words = []
+        full_text = ""
+        for segment in segments:
+            full_text += segment.text + " "
+            for word in segment.words:
+                words.append({
+                    "word": word.word.strip(),
+                    "start": word.start,
+                    "end": word.end
+                })
+                
+        return {
+            "text": full_text.strip(),
+            "words": words
+        }
+    except Exception as e:
+        logger.error(f"Failed to transcribe audio: {str(e)}")
+        raise e
 
 def search_pexels_videos(query):
     """Searches Pexels for a video based on query and returns the best URL."""
@@ -107,41 +115,47 @@ def analyze_with_gemini(transcript):
 
     prompt = f"""
     Act as a Senior Viral Video Editor (OpusClip/Hormozi style) with a HIGH-END, CLEAN aesthetic.
-    Analyze the transcript and identify the most engaging, viral continuous segment (25-60s).
+    Analyze the transcript and identify the TOP 5 most engaging, viral continuous segments (25-60s each).
+    Segments must be distinct.
     
     CLEAN PROFESSIONAL EDITING STRATEGY (CRITICAL):
-    1. DYNAMIC CUTS (Punch Zooms): Use "in" (fast scale jump) sparingly on important punchlines, and "out" to reset. Use a maximum of 2-5 zooms in the ENTIRE clip. Let the content breathe.
+    1. DYNAMIC CUTS (Punch ZoOMS): Use "in" (fast scale jump) sparingly on important punchlines, and "out" to reset. Use a maximum of 2-5 zooms in the ENTIRE clip. Let the content breathe.
     2. DEPTH & MOVEMENT: Use "ken-burns" during storytelling segments for an extremely subtle, slow drift. NEVER USE "shake" or fast continuous movements.
     3. PRECISION ICONS (EMOJIS): Use them to reinforce specific concepts or emotions. 
        - EMOJI ALIGNMENT (MANDATORY): Choose icons that are STRICTLY aligned with what is being said.
        - SPANISH SUPPORT: If the transcript is in Spanish, map the Spanish concepts to the most appropriate English keywords from the list below.
-       - VARIETY & DIVERSITY: Do not repeat the same icon unless necessary. Use the most appropriate one from the available list.
        - DENSITY: 4-7 icons total.
-       - AVAILABLE KEYWORDS (Grouped by category):
-         * Core: 'money', 'cash', 'rich', 'idea', 'think', 'mind', 'warning', 'alert', 'danger', 'stop', 'no', 'error', 'wrong', 'check', 'yes', 'correct', 'ok', 'time', 'clock', 'fast', 'speed', 'heart', 'love', 'hot', 'rocket', 'growth', 'up', 'down', 'work', 'task', 'office', 'success', 'win', 'star'
-         * Emotions/Reactions: 'laugh', 'funny', 'lol', 'wow', 'shock', 'amazing', 'cool', 'look', 'eye', 'sad', 'bad', 'cry'
-         * Tech/Tools: 'phone', 'computer', 'tech', 'camera', 'video', 'mic', 'search', 'find', 'link', 'lock', 'shield', 'tool', 'fix', 'build'
-         * Life/World: 'book', 'learn', 'write', 'news', 'mail', 'chat', 'home', 'world', 'travel', 'sun', 'moon', 'star_special', 'music', 'sound', 'gift', 'party', 'health'
+       - AVAILABLE KEYWORDS: 'money', 'cash', 'rich', 'idea', 'think', 'mind', 'warning', 'alert', 'danger', 'stop', 'no', 'error', 'wrong', 'check', 'yes', 'correct', 'ok', 'time', 'clock', 'fast', 'speed', 'heart', 'love', 'hot', 'rocket', 'growth', 'up', 'down', 'work', 'task', 'office', 'success', 'win', 'star', 'laugh', 'funny', 'lol', 'wow', 'shock', 'amazing', 'cool', 'look', 'eye', 'sad', 'bad', 'cry', 'phone', 'computer', 'tech', 'camera', 'video', 'mic', 'search', 'find', 'link', 'lock', 'shield', 'tool', 'fix', 'build', 'book', 'learn', 'write', 'news', 'mail', 'chat', 'home', 'world', 'travel', 'sun', 'moon', 'star_special', 'music', 'sound', 'gift', 'party', 'health'
     4. B-ROLL: Prioritize finding high-quality short b-roll clips from Pexels for context.
 
-    Output the result as raw JSON:
+    Output the result as raw JSON (Array of 5 clips):
 
     {{
-        "start": <float>,
-        "end": <float>,
-        "reasoning": "<why this will go viral - in English or Spanish>",
-        "clip_text": "<text summary in the same language as transcript>",
-        "edit_events": {{
-            "zooms": [
-                {{ "time": <float>, "type": "in" | "out" | "ken-burns", "intensity": 0.5 }}
-            ],
-            "icons": [
-                {{ "time": <float>, "keyword": "money" | "idea" | "warning" | "time" | "heart" | "rocket" | "work" | "success" | etc..., "layout": "center" | "top" | "grid" | "scattered", "duration": 1.5 }}
-            ],
-            "b_rolls": [
-                {{ "time": <float>, "query": "<search_query in English for Pexels>", "duration": 3.0 }}
-            ]
+      "clips": [
+        {{
+          "id": 1,
+          "title": "<Catchy clickbait title in Spanish>",
+          "score": 0,
+          "hook_score": "A",
+          "flow_score": "A",
+          "value_score": "A",
+          "trend_score": "A",
+          "start": 0.0,
+          "end": 0.0,
+          "reasoning": "<why this will go viral - in English>",
+          "edit_events": {{
+              "zooms": [
+                  {{ "time": 0.0, "type": "in", "intensity": 0.5 }}
+              ],
+              "icons": [
+                  {{ "time": 0.0, "keyword": "money", "layout": "center", "duration": 1.5 }}
+              ],
+              "b_rolls": [
+                  {{ "time": 0.0, "query": "<search_query in English for Pexels>", "duration": 3.0 }}
+              ]
+          }}
         }}
+      ]
     }}
     
     Transcript: 
@@ -159,26 +173,33 @@ def analyze_with_gemini(transcript):
         )
         
         result = json.loads(response.text)
-        logger.info(f"Gemini identified clip from {result['start']}s to {result['end']}s.")
-        logger.info(f"Reasoning: {result['reasoning']}")
+        if "clips" in result and len(result["clips"]) > 0:
+            best_clip = result["clips"][0]
+            logger.info(f"Gemini identified {len(result['clips'])} potential clips. Best starts at {best_clip.get('start')}s.")
+        
+        logger.info(f"Reasoning: {result.get('reasoning', 'N/A')}")
         return result
     except Exception as e:
         logger.exception(f"Failed to process Gemini response. Response text: {getattr(response, 'text', 'N/A')}")
         raise e
 
 def extract_frame(video_path, time_in_seconds, output_path):
-    print(f"Extracting frame at {time_in_seconds}s to {output_path}...")
-    command = [
-        "ffmpeg",
-        "-ss", str(time_in_seconds),
-        "-i", video_path,
-        "-vframes", "1",
-        "-q:v", "2",
-        "-y",
-        output_path
-    ]
-    subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return output_path
+    logger.info(f"Extracting frame at {time_in_seconds}s to {output_path}...")
+    try:
+        command = [
+            "ffmpeg",
+            "-ss", str(time_in_seconds),
+            "-i", video_path,
+            "-vframes", "1",
+            "-q:v", "2",
+            "-y",
+            output_path
+        ]
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return output_path
+    except Exception as e:
+        logger.error(f"Failed to extract frame: {str(e)}")
+        raise e
 
 def detect_face_center_mediapipe(image_path):
     """Uses Google's MediaPipe Tasks API to detect faces — works in any lighting/angle."""
@@ -467,43 +488,48 @@ def analyze_framing_with_gemini_old(video_path, start_time, end_time):
 
 def process_video_ffmpeg(input_path, output_path, start_time, end_time, audio_path=None):
     logger.info(f"Extracting LOSSLESS clip: {start_time}s to {end_time}s...")
-    duration = float(end_time) - float(start_time)
-    
-    command = [
-        "ffmpeg", "-y",
-        "-ss", str(start_time),
-        "-i", input_path,
-        "-t", str(duration),
-        "-c:v", "libx264",
-        "-crf", "17", # HIGH QUALITY (Visually Lossless)
-        "-preset", "ultrafast",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        output_path
-    ]
-    
-    subprocess.run(command, check=True)
-    logger.info(f"Lossless clip saved to {output_path}")
+    try:
+        duration = float(end_time) - float(start_time)
+        
+        command = [
+            "ffmpeg", "-y",
+            "-ss", str(start_time),
+            "-i", input_path,
+            "-t", str(duration),
+            "-c:v", "libx264",
+            "-crf", "17", # HIGH QUALITY (Visually Lossless)
+            "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            output_path
+        ]
+        
+        subprocess.run(command, check=True)
+        logger.info(f"Lossless clip saved to {output_path}")
 
-    # Extract precise WAV audio to guarantee 0 audio stutters in Chromium/Remotion
-    audio_output = audio_path if audio_path else output_path.replace(".mp4", ".wav")
-    logger.info(f"Extracting pristine Audio WAV track to {audio_output}...")
-    audio_cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", output_path,
-        "-vn",
-        "-c:a", "pcm_s16le",
-        "-ar", "44100",
-        "-ac", "2",
-        audio_output
-    ]
-    subprocess.run(audio_cmd, check=True)
-    return output_path
+        # Extract precise WAV audio to guarantee 0 audio stutters in Chromium/Remotion
+        audio_output = audio_path if audio_path else output_path.replace(".mp4", ".wav")
+        logger.info(f"Extracting pristine Audio WAV track to {audio_output}...")
+        audio_cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", output_path,
+            "-vn",
+            "-c:a", "pcm_s16le",
+            "-ar", "44100",
+            "-ac", "2",
+            audio_output
+        ]
+        subprocess.run(audio_cmd, check=True)
+        return output_path
+    except Exception as e:
+        logger.error(f"FFmpeg processing failed: {str(e)}")
+        raise e
 
 if __name__ == "__main__":
     import sys
+    import traceback
     # 0. Get arguments
     youtube_url = sys.argv[1] if len(sys.argv) > 1 else None
     version = sys.argv[2] if len(sys.argv) > 2 else str(int(time.time()))
@@ -530,7 +556,12 @@ if __name__ == "__main__":
         transcript = transcribe_audio(video_file)
             
         # 3. Analyze
-        analysis = analyze_with_gemini(transcript)
+        multi_analysis = analyze_with_gemini(transcript)
+        # For now, we only process the first clip (usually highest score) to maintain flow
+        if not multi_analysis or "clips" not in multi_analysis or not multi_analysis["clips"]:
+            raise ValueError("Gemini failed to identify any viral clips.")
+            
+        analysis = multi_analysis["clips"][0]
         
         # 3.5 Adjust Transcript Timestamps
         start_time = float(analysis['start'])
@@ -546,7 +577,7 @@ if __name__ == "__main__":
                 })
                 
         adjusted_transcript = {
-            "text": analysis.get("clip_text", ""),
+            "text": analysis.get("clip_text", ""), # Note: 'clip_text' might need to be re-added or derived
             "words": adjusted_words
         }
         
@@ -565,6 +596,7 @@ if __name__ == "__main__":
 
         # 3.9 Prepare final transcript data for Remotion
         final_data = {
+            "clips": multi_analysis["clips"], # Keep all clips metadata
             "text": analysis.get("clip_text", ""),
             "duration": end_time - start_time,
             "words": adjusted_words,
@@ -596,6 +628,6 @@ if __name__ == "__main__":
             l.flush()
 
     except Exception as e:
-        logger.exception("CRITICAL ERROR: Pipeline failed dramatically.")
-        print(f"Pipeline failed: {str(e)}")
+        logger.error("CRITICAL ERROR: Pipeline failed dramatically.")
+        logger.error(traceback.format_exc())
         sys.exit(1)

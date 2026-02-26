@@ -162,11 +162,22 @@ def run_pipeline(url: str, version: int):
         else:
             state.status = "failed"
             state.message = "Pipeline failed."
-            state.error = "Check pipeline.log for crash details."
+            # Try to read the last error from pipeline.log
+            try:
+                with open("pipeline.log", "r", encoding="utf-8") as lf:
+                    lines = lf.readlines()
+                    last_error = "Check logs."
+                    for line in reversed(lines):
+                        if "ERROR" in line:
+                            last_error = line.strip()
+                            break
+                    state.error = last_error
+            except:
+                state.error = "Unknown pipeline crash."
             
     except Exception as e:
         state.status = "failed"
-        state.message = "Error occurred"
+        state.message = "Critical Error"
         state.error = str(e)
 
 @app.post("/api/update-framing")

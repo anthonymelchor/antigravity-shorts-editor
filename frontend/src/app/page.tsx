@@ -1,37 +1,28 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Player, PlayerRef } from '@remotion/player';
 import { Main } from '../remotion/Composition';
 import {
-  Play,
   Youtube,
-  Cpu,
-  Download,
-  Settings,
-  CheckCircle2,
-  XCircle,
-  Loader2,
-  Rocket,
-  MoveHorizontal,
-  LayoutTemplate,
-  Scissors,
-  Split,
-  Trash2,
-  Clock,
-  Maximize2,
-  Minimize2,
-  Zap,
-  Eye,
-  EyeOff,
-  SkipBack,
-  SkipForward,
+  Upload,
   RotateCcw,
-  Type,
-  Check,
-  Eraser,
-  AlertTriangle,
-  ShieldAlert
+  Settings,
+  ShieldAlert,
+  Link as LinkIcon,
+  Cloud,
+  ChevronRight,
+  Play,
+  ThumbsUp,
+  ThumbsDown,
+  Download,
+  ExternalLink,
+  Edit2,
+  Scissors,
+  Zap,
+  Layout,
+  Video,
+  Check
 } from 'lucide-react';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
@@ -61,33 +52,15 @@ class GlobalErrorBoundary extends React.Component<{ children: React.ReactNode },
     super(props);
     this.state = { hasError: false };
   }
-
-  static getDerivedStateFromError() {
-    return { hasError: true };
-  }
-
-  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    logErrorToBackend(error, errorInfo.componentStack);
-  }
-
+  static getDerivedStateFromError() { return { hasError: true }; }
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) { logErrorToBackend(error, errorInfo.componentStack ?? undefined); }
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen bg-[#050505] flex flex-col items-center justify-center p-8 text-center">
-          <div className="w-24 h-24 bg-red-500/10 rounded-[2rem] flex items-center justify-center mb-10 border border-red-500/20 shadow-[0_0_50px_rgba(239,68,68,0.1)]">
-            <ShieldAlert className="w-10 h-10 text-red-500" />
-          </div>
-          <h1 className="text-3xl font-black uppercase tracking-tighter mb-4 text-white">System Encountered a Hiccup</h1>
-          <p className="text-neutral-500 max-w-md text-sm leading-relaxed mb-10 font-medium">
-            We apologize for the inconvenience. A technical anomaly has been captured and sent to our engineering team for immediate review.
-          </p>
-          <button
-            onClick={() => window.location.reload()}
-            className="px-10 py-4 bg-white text-black text-[10px] font-black uppercase tracking-[0.2em] rounded-2xl hover:bg-purple-600 hover:text-white transition-all shadow-2xl active:scale-95"
-          >
-            Restart Application
-          </button>
-          <p className="mt-12 text-[9px] text-neutral-800 font-bold uppercase tracking-[0.5em]">Antigravity Engine • Error ID: {Math.random().toString(36).substr(2, 9).toUpperCase()}</p>
+        <div className="min-h-screen bg-black flex flex-col items-center justify-center p-8 text-center">
+          <ShieldAlert className="w-16 h-16 text-red-500 mb-6" />
+          <h1 className="text-2xl font-bold mb-4 text-white uppercase tracking-tighter">System Error</h1>
+          <button onClick={() => window.location.reload()} className="px-8 py-3 bg-white text-black font-bold uppercase rounded-xl">Restart</button>
         </div>
       );
     }
@@ -97,6 +70,7 @@ class GlobalErrorBoundary extends React.Component<{ children: React.ReactNode },
 
 export default function Home() {
   const [url, setUrl] = useState('');
+  const [view, setView] = useState<'dashboard' | 'results' | 'editor'>('dashboard');
   const [status, setStatus] = useState({
     status: 'idle',
     progress: 0,
@@ -104,15 +78,9 @@ export default function Home() {
     error: null as string | null
   });
   const [transcript, setTranscript] = useState<any>(null);
-  const [previewKey, setPreviewKey] = useState(0);
-  const [showGuides, setShowGuides] = useState(false); // Forced OFF for 9:16 ONLY mode
+  const [selectedClipIdx, setSelectedClipIdx] = useState(0);
+  const [selectedForRender, setSelectedForRender] = useState<number[]>([]);
   const playerRef = useRef<PlayerRef>(null);
-  const timelineRef = useRef<HTMLDivElement>(null);
-
-  const [currentTime, setCurrentTime] = useState(0);
-  const [activeSegmentIdx, setActiveSegmentIdx] = useState<number>(0);
-  const [showTranscriptEditor, setShowTranscriptEditor] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
 
   useEffect(() => {
     checkInitialStatus();
@@ -123,16 +91,11 @@ export default function Home() {
       const transRes = await fetch(`${API_BASE}/api/transcript`);
       const transData = await transRes.json();
       if (transData && !transData.error) {
-        if (!transData.framing_segments) {
-          const duration = transData.words[transData.words.length - 1]?.end || 30;
-          transData.framing_segments = [{ start: 0, end: duration, center: transData.center || 0.5 }];
-        }
         setTranscript(transData);
         setStatus(prev => ({ ...prev, status: 'completed', progress: 100 }));
+        // If we have a transcript, the project is "done"
       }
-    } catch (err) {
-      console.log("Empty project");
-    }
+    } catch (err) { console.log("Empty project"); }
   };
 
   useEffect(() => {
@@ -143,10 +106,8 @@ export default function Home() {
           const res = await fetch(`${API_BASE}/api/status`);
           const data = await res.json();
           setStatus(data);
-
           if (data.status === 'completed') {
             checkInitialStatus();
-            setPreviewKey(prev => prev + 1);
           }
         } catch (err) { console.error("Poll failed", err); }
       }, 1000);
@@ -154,59 +115,16 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [status.status]);
 
-  useEffect(() => {
-    if (transcript?.framing_segments && activeSegmentIdx >= transcript.framing_segments.length) {
-      setActiveSegmentIdx(0);
-    }
-  }, [transcript, activeSegmentIdx]);
-
-  useEffect(() => {
-    const player = playerRef.current;
-    if (!player) return;
-    const interval = setInterval(() => {
-      const frame = player.getCurrentFrame();
-      const time = frame / 30;
-      setCurrentTime(time);
-      if (transcript?.framing_segments) {
-        const idx = transcript.framing_segments.findIndex((s: any) => time >= s.start && time < s.end);
-        if (idx !== -1 && idx !== activeSegmentIdx) setActiveSegmentIdx(idx);
-      }
-    }, 33);
-    return () => clearInterval(interval);
-  }, [transcript, activeSegmentIdx]);
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
-      if (!playerRef.current) return;
-      const f = playerRef.current.getCurrentFrame();
-      if (e.key === 'ArrowRight' || e.key === 'l') playerRef.current.seekTo(f + (e.shiftKey ? 30 : 2));
-      else if (e.key === 'ArrowLeft' || e.key === 'j') playerRef.current.seekTo(Math.max(0, f - (e.shiftKey ? 30 : 2)));
-      else if (e.key === ' ') { e.preventDefault(); playerRef.current.isPlaying() ? playerRef.current.pause() : playerRef.current.play(); }
-      else if (e.key === 's') addCut();
-      else if (e.key === 'g') setShowGuides(prev => !prev);
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [transcript]);
-
   const handleProcess = async () => {
-    if (!url.trim()) {
-      setStatus({ ...status, status: 'failed', error: 'Please enter a valid YouTube URL first.' });
-      return;
-    }
+    if (!url.trim()) return;
     try {
-      // CLEAR OLD PROJECT STATE IMMEDIATELY
       setTranscript(null);
-      setActiveSegmentIdx(0);
-      setCurrentTime(0);
-      setPreviewKey(prev => prev + 1);
-
-      const res = await fetch(`${API_BASE}/api/process`, {
+      await fetch(`${API_BASE}/api/process`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url })
       });
       setStatus({ status: 'processing', progress: 0, message: 'Waking up engine...', error: null });
+      setView('dashboard');
     } catch (err: any) {
       logErrorToBackend(err, 'handleProcess');
       setStatus({ ...status, status: 'failed', error: 'Internal Engine Communication Error' });
@@ -214,332 +132,425 @@ export default function Home() {
   };
 
   const handleReset = async () => {
-    if (!confirm("HARD RESET: Deleting all project data and temporary files. Continue?")) return;
+    if (!confirm("HARD RESET: Deleting all project data. Continue?")) return;
     try {
       await fetch(`${API_BASE}/api/reset`, { method: 'POST' });
       setTranscript(null); setUrl('');
       setStatus({ status: 'idle', progress: 0, message: 'Project Cleared', error: null });
-    } catch (err: any) {
-      logErrorToBackend(err, 'handleReset');
-      alert("System Reset failed. Please try again or contact administrator.");
-    }
+      setView('dashboard');
+    } catch (err: any) { logErrorToBackend(err, 'handleReset'); }
   };
 
-  const handleRender = async () => {
-    try {
-      await fetch(`${API_BASE}/api/render`, { method: 'POST' });
-      setStatus({ status: 'rendering', progress: 10, message: 'Generating Final Clip...', error: null });
-    } catch (err: any) {
-      logErrorToBackend(err, 'handleRender');
-      setStatus({ ...status, status: 'failed', error: 'Server Render Engine Timeout' });
-    }
-  };
-
-  const saveToBackend = async (data: any) => {
-    try {
-      await fetch(`${API_BASE}/api/update-framing`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-      });
-    } catch (err: any) {
-      logErrorToBackend(err, 'saveToBackend');
-      console.error("Auto-save failed");
-    }
-  };
-
-  const updateSegmentCenter = (idx: number, center: number) => {
-    const newSegments = [...transcript.framing_segments];
-    newSegments[idx].center = center;
-    const updated = { ...transcript, framing_segments: newSegments };
-    setTranscript(updated);
-    saveToBackend(updated);
-  };
-
-  const deleteWord = (wordIdx: number) => {
-    const newWords = [...transcript.words];
-    newWords.splice(wordIdx, 1);
-    const updated = { ...transcript, words: newWords };
-    setTranscript(updated);
-    saveToBackend(updated);
-  };
-
-  const removeVFXFromCurrentSegment = () => {
-    // Deletes VFX elements that occur within the active segment
+  const removeEmoji = (idxToRemove: number) => {
     if (!transcript) return;
-    const seg = transcript.framing_segments[activeSegmentIdx];
-    if (!seg) return;
-    const newZooms = (transcript.edit_events?.zooms || []).filter((z: any) => z.time < seg.start || z.time > seg.end);
-    const newIcons = (transcript.edit_events?.icons || []).filter((i: any) => i.time < seg.start || i.time > seg.end);
-
-    const updated = {
-      ...transcript,
-      edit_events: { ...transcript.edit_events, zooms: newZooms, icons: newIcons }
-    };
-    setTranscript(updated);
-    saveToBackend(updated);
+    const newTranscript = { ...transcript };
+    // Check if it's stored inside clips or globally
+    const clipIcons = newTranscript?.clips?.[selectedClipIdx]?.edit_events?.icons;
+    if (clipIcons && Array.isArray(clipIcons)) {
+      newTranscript.clips[selectedClipIdx].edit_events.icons = clipIcons.filter((_: any, i: number) => i !== idxToRemove);
+    } else if (newTranscript?.edit_events?.icons && Array.isArray(newTranscript.edit_events.icons)) {
+      newTranscript.edit_events.icons = newTranscript.edit_events.icons.filter((_: any, i: number) => i !== idxToRemove);
+    }
+    setTranscript(newTranscript);
   };
 
-  const addCut = () => {
-    if (!playerRef.current || !transcript) return;
-    const t = playerRef.current.getCurrentFrame() / 30;
-    const idx = transcript.framing_segments.findIndex((s: any) => t > s.start && t < s.end);
-    if (idx === -1) return;
-    const old = transcript.framing_segments[idx];
-    const newSegs = [...transcript.framing_segments.slice(0, idx + 1), { start: t, end: old.end, center: old.center }, ...transcript.framing_segments.slice(idx + 1)];
-    newSegs[idx].end = t;
-    const updated = { ...transcript, framing_segments: newSegs };
-    setTranscript(updated);
-    setActiveSegmentIdx(idx + 1);
-    saveToBackend(updated);
-  };
-
-  const deleteSegment = (idx: number) => {
-    if (transcript.framing_segments.length <= 1) return;
-    const newSegs = [...transcript.framing_segments];
-    if (idx > 0) { newSegs[idx - 1].end = newSegs[idx].end; newSegs.splice(idx, 1); setActiveSegmentIdx(idx - 1); }
-    else { newSegs[idx + 1].start = newSegs[idx].start; newSegs.splice(idx, 1); setActiveSegmentIdx(0); }
-    const updated = { ...transcript, framing_segments: newSegs };
-    setTranscript(updated);
-    saveToBackend(updated);
-  };
-
-  const getDuration = () => {
-    if (!transcript) return 30;
-    if (transcript.duration) return transcript.duration;
-    if (transcript.words && transcript.words.length > 0) return transcript.words[transcript.words.length - 1].end;
-    return 30;
-  };
-
-  const handleTimelineInteraction = (clientX: number) => {
-    if (!timelineRef.current) return;
-    const rect = timelineRef.current.getBoundingClientRect();
-    // Offset by 64px (w-16) which is the width of the track labels
-    const contentWidth = rect.width - 64;
-    const x = Math.max(0, Math.min(clientX - rect.left - 64, contentWidth));
-    playerRef.current?.seekTo(Math.round(((x / contentWidth) * getDuration()) * 30));
-  };
-
-  const inputProps = useMemo(() => {
-    return {
-      transcript,
-      isPlayer: true
-    };
-  }, [transcript]);
-
-  return (
-    <GlobalErrorBoundary>
-      <main className="min-h-screen bg-[#020202] text-neutral-100 font-sans selection:bg-purple-500/30 overflow-hidden flex flex-col">
-        <div className="fixed inset-0 pointer-events-none opacity-20" style={{ backgroundImage: 'url("https://grainy-gradients.vercel.app/noise.svg")' }} />
-
-        {/* Navbar */}
-        <nav className="relative z-50 border-b border-white/5 bg-black/60 backdrop-blur-3xl px-8 flex items-center justify-between h-16 shadow-2xl">
-          <div className="flex items-center gap-5">
-            <div className="w-10 h-10 bg-gradient-to-tr from-purple-600 via-indigo-500 to-blue-500 rounded-[12px] flex items-center justify-center shadow-2xl shadow-purple-500/30 ring-1 ring-white/20">
-              <Zap className="w-5 h-5 text-white fill-current" />
-            </div>
-            <div className="flex flex-col">
-              <span className="text-lg font-black tracking-tighter uppercase leading-none">Antigravity <span className="text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-400">PRO V5.0</span></span>
-              <span className="text-[9px] text-neutral-600 font-bold tracking-[0.3em] uppercase mt-1">Master Editor Engine</span>
-            </div>
+  const resultsLayout = (
+    <div className="flex-1 flex flex-col bg-black">
+      {/* Navbar Results */}
+      <nav className="border-b border-white/5 px-12 h-20 flex items-center justify-between bg-black/50 backdrop-blur-xl">
+        <div className="flex items-center gap-4">
+          <button onClick={() => setView('dashboard')} className="p-2 hover:bg-white/5 rounded-full transition-all">
+            <ChevronRight className="w-5 h-5 rotate-180" />
+          </button>
+          <h1 className="text-xl font-bold tracking-tighter uppercase">RocotoClip</h1>
+        </div>
+        <div className="flex items-center gap-6">
+          <div className="flex flex-col items-end">
+            <span className="text-[10px] font-black text-neutral-500 uppercase">Analysis Complete</span>
+            <span className="text-xs font-bold text-white">5 Clips Identified</span>
           </div>
+        </div>
+      </nav>
 
-          <div className="flex items-center gap-8">
-            <button onClick={handleReset} disabled={!transcript && status.status === 'idle'} className={`flex items-center gap-2 text-[10px] font-black uppercase tracking-widest transition-all group ${(!transcript && status.status === 'idle') ? 'text-neutral-700 cursor-not-allowed' : 'text-neutral-500 hover:text-red-400'}`}>
-              <RotateCcw className={`w-4 h-4 ${(!transcript && status.status === 'idle') ? '' : 'group-hover:rotate-[-45deg]'} transition-transform`} /> Emergency Reset
-            </button>
-            <div className="h-4 w-px bg-white/10" />
-            <button onClick={handleRender} disabled={!transcript || status.status === 'rendering'} className={`text-[10px] font-black uppercase tracking-widest px-8 py-3 rounded-2xl transition-all shadow-xl active:scale-95 ${!transcript ? 'bg-white/10 text-white/20 cursor-not-allowed' : 'bg-white text-black hover:bg-purple-500 hover:text-white disabled:opacity-30'}`}>
-              {status.status === 'rendering' ? 'Rendering...' : 'Finalize & Render'}
+      {/* ERROR OVERLAY IF FAILED WHILE VIEWING */}
+      {status.status === 'failed' && (
+        <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-12">
+          <div className="max-w-md w-full bg-neutral-900 border border-red-500/20 p-10 rounded-[3rem] text-center shadow-2xl">
+            <ShieldAlert className="w-12 h-12 text-red-500 mx-auto mb-6" />
+            <h2 className="text-xl font-black uppercase text-white mb-4">Lo sentimos</h2>
+            <p className="text-neutral-400 text-sm mb-8">Hubo un fallo en el proceso, estamos trabajando para solucionarlo.</p>
+            <button
+              onClick={() => setView('dashboard')}
+              className="w-full bg-white text-black font-black py-4 rounded-2xl uppercase text-[10px] tracking-widest hover:bg-neutral-200 transition-all"
+            >
+              Volver al Panel
             </button>
           </div>
-        </nav>
+        </div>
+      )}
 
-        <div className="relative z-10 flex-1 flex overflow-hidden">
-          {/* Workspace Body */}
-          <div className="flex-1 flex flex-col bg-[#050505] border-r border-white/5 relative">
+      {/* Top Menu for Results */}
+      <div className="border-b border-white/5 py-4 px-12 flex justify-between items-center bg-[#050505] sticky top-0 z-50">
+        <span className="text-xs font-bold text-neutral-500 uppercase tracking-widest">Select the clips you want to export</span>
+        <button
+          disabled={selectedForRender.length === 0}
+          className="px-6 py-2 bg-purple-600 hover:bg-purple-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl disabled:opacity-30 transition-all shadow-[0_0_20px_rgba(147,51,234,0.3)]">
+          Render Selected ({selectedForRender.length})
+        </button>
+      </div>
 
-            <div className="flex-1 flex items-center justify-center p-8">
-              <div className={`h-[calc(100vh-360px)] aspect-[9/16] bg-black rounded-3xl overflow-hidden shadow-[0_0_120px_rgba(0,0,0,1)] border border-white/10 relative transition-all duration-500`}>
-                {transcript ? (
-                  <Player ref={playerRef} key={previewKey} component={Main} durationInFrames={Math.ceil(getDuration() * 30)}
-                    compositionWidth={1080}
-                    compositionHeight={1920}
-                    fps={30} style={{ width: '100%', height: '100%' }} controls
-                    inputProps={inputProps} />
-                ) : (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-12">
-                    <div className="w-16 h-16 bg-white/5 rounded-3xl flex items-center justify-center mb-8 border border-white/10 animate-pulse">
-                      <Youtube className="w-8 h-8 text-neutral-700" />
-                    </div>
-                    <h3 className="text-xl font-black uppercase tracking-tighter mb-4 text-white/50">Ready for Input</h3>
-                    <div className="w-full max-w-sm space-y-4">
-                      <input type="text" placeholder="Paste Video Link..." className="w-full bg-black/60 border border-white/10 rounded-2xl px-6 py-4 text-xs font-mono focus:ring-2 focus:ring-purple-500/50 outline-none transition-all placeholder:text-neutral-700" value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && (status.status === 'idle' || status.status === 'failed') && handleProcess()} disabled={status.status !== 'idle' && status.status !== 'failed'} />
-                      <button onClick={handleProcess} disabled={(status.status !== 'idle' && status.status !== 'failed') || !url.trim()} className="w-full bg-purple-600 text-white py-4 rounded-3xl font-black uppercase text-[10px] tracking-widest hover:bg-purple-500 transition-all shadow-2xl disabled:opacity-50 disabled:cursor-not-allowed transition-opacity duration-300">
-                        {status.status === 'idle' || status.status === 'failed' ? 'Load Engine' : 'Processing...'}
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
+      {/* Main Content Area - Cascade View */}
+      <div className="flex-1 overflow-y-auto p-12 bg-black custom-scrollbar">
+        <div className="max-w-6xl mx-auto flex flex-col gap-12 pb-24">
+          {transcript?.clips?.slice(0, 1).map((clip: any, idx: number) => {
+            const isSelected = selectedForRender.includes(idx);
+            const toggleSelect = () => setSelectedForRender(prev =>
+              prev.includes(idx) ? prev.filter(i => i !== idx) : [...prev, idx]
+            );
 
-              {/* View Mode Switcher Removed - Only 9:16 Output Mode is allowed now */}
+            return (
+              <div key={idx} className="flex gap-10 items-start">
 
-              {transcript && (
-                <div className="absolute top-12 right-12 flex flex-col gap-4">
-                  <button onClick={() => setShowTranscriptEditor(prev => !prev)} className={`p-4 rounded-3xl border transition-all ${showTranscriptEditor ? 'bg-indigo-600 border-indigo-400 shadow-xl' : 'bg-black/60 border-white/10 text-neutral-500 hover:text-white'}`}>
-                    <Type className="w-6 h-6" />
-                  </button>
-                </div>
-              )}
-            </div>
+                {/* Left Column: Number & Checkbox & Score */}
+                <div className="w-20 pt-16 flex flex-col items-center shrink-0">
 
-            {/* New Multi-Track Timeline */}
-            {transcript && (
-              <div className="h-64 bg-black/80 backdrop-blur-3xl border-t border-white/10 p-6 flex flex-col gap-4">
-                <div className="flex items-center gap-8">
-                  <div className="text-4xl font-mono font-black text-white/90 tabular-nums w-48">{Math.floor(currentTime / 60)}:{(currentTime % 60).toFixed(2).padStart(5, '0')}</div>
-                  <button onClick={addCut} className="bg-gradient-to-r from-purple-600 to-indigo-600 text-white px-8 py-3 rounded-2xl font-black uppercase text-[11px] tracking-widest active:scale-95 shadow-2xl hover:brightness-125 transition-all flex items-center gap-3">
-                    <Scissors className="w-5 h-5" /> Cut
-                  </button>
-                </div>
+                  <div className="text-2xl font-black text-neutral-600 mb-8">#{idx + 1}</div>
 
-                {/* TRACKS CONTAINER */}
-                <div
-                  className="relative flex-1 flex flex-col gap-1 cursor-crosshair group touch-none"
-                  ref={timelineRef}
-                  onPointerDown={(e) => { setIsDragging(true); handleTimelineInteraction(e.clientX); e.currentTarget.setPointerCapture(e.pointerId); }}
-                  onPointerMove={(e) => { if (isDragging) handleTimelineInteraction(e.clientX); }}
-                  onPointerUp={(e) => { setIsDragging(false); e.currentTarget.releasePointerCapture(e.pointerId); }}
-                >
-                  {/* Global Playhead (Offset by 64px to match content) */}
-                  <div className="absolute top-0 bottom-0 left-16 right-0 pointer-events-none z-[100]">
-                    <div className="absolute top-0 bottom-0 w-[2px] bg-red-600 shadow-[0_0_15px_rgba(220,38,38,1)] transition-none" style={{ left: `${(currentTime / getDuration()) * 100}%` }}>
-                      <div className="w-4 h-4 bg-red-500 rounded-full absolute -top-2 -left-[7px] border-2 border-white shadow-[0_0_10px_rgba(239,68,68,0.8)]" />
-                    </div>
+                  <div className="flex flex-col items-center gap-2 mb-8">
+                    <Zap className="w-5 h-5 text-yellow-500 fill-yellow-500" />
+                    <span className="text-3xl font-black text-white">{clip.score}</span>
+                    <span className="text-[10px] text-neutral-600 font-bold">/100</span>
                   </div>
 
-                  {/* TRACK 1: VFX & Emojis */}
-                  <div className="h-8 bg-white/5 rounded-lg border border-white/5 relative hover:bg-white/10 transition-all flex items-center overflow-hidden">
-                    <div className="absolute left-0 top-0 bottom-0 w-16 bg-black/80 border-r border-white/10 flex items-center justify-center text-[8px] font-black uppercase text-yellow-500 tracking-widest z-50">VFX</div>
-                    {transcript?.edit_events?.zooms?.map((z: any, idx: number) => (
-                      <div key={`z-${idx}`} className="absolute top-1 bottom-1 w-1 rounded bg-blue-500/80 shadow-[0_0_10px_rgba(59,130,246,0.6)]" style={{ left: `${(z.time / getDuration()) * 100}%` }} />
-                    ))}
-                    {transcript?.edit_events?.icons?.map((icon: any, idx: number) => (
-                      <div key={`i-${idx}`} className="absolute top-1 bottom-1 rounded bg-yellow-400/80 text-[8px] font-black px-1.5 flex items-center shadow-[0_0_10px_rgba(250,204,21,0.6)] whitespace-nowrap overflow-hidden text-black uppercase" style={{ left: `${(icon.time / getDuration()) * 100}%` }}>{icon.keyword}</div>
+                  <div className="flex flex-col gap-2 w-full px-2 mb-8">
+                    {['hook', 'flow', 'value', 'trend'].map(m => (
+                      <div key={m} className="flex justify-between items-center bg-white/5 rounded border border-white/5 px-2 py-1">
+                        <span className="text-[9px] font-bold text-neutral-500 uppercase">{m[0]}</span>
+                        <span className="text-[10px] font-black text-neutral-300">{clip[`${m}_score`]}</span>
+                      </div>
                     ))}
                   </div>
+                </div>
 
-                  {/* TRACK 2: Camera Cuts (Segments) */}
-                  <div className="h-14 bg-black/50 rounded-xl border border-white/5 relative hover:bg-[#0a0a0a] transition-all">
-                    <div className="absolute left-0 top-0 bottom-0 w-16 bg-black/80 border-r border-white/10 flex items-center justify-center text-[8px] font-black uppercase text-purple-400 tracking-widest z-50">Cams</div>
-                    <div className="absolute inset-0 left-16">
-                      {transcript?.framing_segments?.map((seg: any, idx: number) => (
-                        <div key={`c-${idx}`} onClick={(e) => { e.stopPropagation(); setActiveSegmentIdx(idx); playerRef.current?.seekTo(Math.round(seg.start * 30)); }}
-                          className={`absolute top-1 bottom-1 border-r border-black/40 rounded-[0.4rem] flex flex-col items-center justify-center cursor-pointer transition-all hover:brightness-150 ${activeSegmentIdx === idx ? 'bg-purple-600/40 border border-purple-500 shadow-[inset_0_0_20px_rgba(168,85,247,0.3)] z-10' : 'bg-white/5'}`}
-                          style={{ left: `${(seg.start / getDuration()) * 100}%`, width: `${((seg.end - seg.start) / getDuration()) * 100}%` }}>
-                          <span className="text-[9px] font-black text-white/50 mb-0.5">SHOT_{idx + 1}</span>
-                          <div className="w-1/2 h-[3px] bg-black rounded-full overflow-hidden"><div className="bg-purple-400 h-full w-[4px] rounded-full" style={{ marginLeft: `${seg.center * 100}%`, transform: 'translateX(-50%)' }} /></div>
+                {/* Main Card (Cascade) */}
+                <div className="flex-1 bg-[#0a0a0a] rounded-[2.5rem] border border-white/5 flex flex-col overflow-hidden shadow-2xl relative">
+
+                  {/* Card Header for the title & edit */}
+                  <div className="h-16 border-b border-white/5 flex items-center justify-between px-8 bg-[#0c0c0c]">
+                    <div className="flex items-center gap-4">
+                      <label className="relative flex cursor-pointer items-center justify-center p-2 group">
+                        <input type="checkbox" className="peer sr-only" checked={isSelected} onChange={toggleSelect} />
+                        <div className="w-6 h-6 rounded-md border-2 border-white/20 peer-checked:bg-purple-600 peer-checked:border-purple-600 transition-all flex items-center justify-center group-hover:border-purple-500">
+                          {isSelected && <Check className="w-4 h-4 text-white" />}
                         </div>
-                      ))}
+                      </label>
+                      <h3 className="text-sm font-bold truncate max-w-[500px] text-white/90">{clip.title || `Segment #${idx + 1}`}</h3>
                     </div>
+                    <button onClick={() => { setSelectedClipIdx(idx); setView('editor'); }} className="w-10 h-10 flex items-center justify-center bg-white text-black hover:bg-neutral-200 rounded-xl transition-transform hover:scale-105 shadow-xl">
+                      <Edit2 className="w-4 h-4" />
+                    </button>
                   </div>
 
-                  {/* TRACK 3: Audio/Subtitles Visualizer (Fake wave) */}
-                  <div className="h-6 bg-white/5 rounded-lg border border-white/5 relative hover:bg-white/10 transition-all overflow-hidden flex items-end">
-                    <div className="absolute left-0 top-0 bottom-0 w-16 bg-black/80 border-r border-white/10 flex items-center justify-center text-[8px] font-black uppercase text-indigo-400 tracking-widest z-50">Subs</div>
-                    <div className="absolute inset-0 left-16">
-                      {transcript?.words?.map((w: any, idx: number) => (
-                        <div key={`w-${idx}`} className={`absolute bottom-0 w-[2px] rounded-t-sm transition-all ${currentTime >= w.start && currentTime <= w.end ? 'bg-indigo-400 h-full' : 'bg-white/20'}`} style={{ left: `${(w.start / getDuration()) * 100}%`, height: `${20 + (Math.sin(idx * 5) * 50)}%` }} />
-                      ))}
+                  {/* Card Body: Video Preview + Details */}
+                  <div className="flex bg-[#050505] p-6 gap-8">
+                    {/* Vertical Preview (Left half inside card, tighter width) */}
+                    <div className="w-[30%] min-w-[200px] flex justify-center items-start">
+                      <div className="w-[200px] aspect-[9/16] bg-black rounded-lg overflow-hidden shadow-2xl border border-white/10 relative">
+                        {/* Always sync player to specific clip duration logic if possible, else standard duration */}
+                        <Player
+                          component={Main}
+                          durationInFrames={Math.ceil((clip.end - clip.start || 30) * 30)}
+                          compositionWidth={1080} compositionHeight={1920} fps={30}
+                          style={{ width: '100%', height: '100%', objectFit: 'contain' }} controls
+                          inputProps={{ transcript, isPlayer: true }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Analysis & Transcript (Right half inside card) */}
+                    <div className="flex-1 flex flex-col p-6 bg-[#0a0a0a] rounded-[1.5rem] border border-white/5">
+                      <div className="flex items-center justify-between mb-4">
+                        <h2 className="text-xs font-black uppercase tracking-widest italic text-white">Scene analysis</h2>
+                      </div>
+
+                      <p className="text-neutral-400 leading-relaxed text-xs mb-8">
+                        {clip.reasoning || "Analyzing context for viral potential and topic coherence..."}
+                      </p>
+
+                      <div className="flex-1 flex flex-col min-h-[150px]">
+                        <div className="flex items-center gap-2 mb-4 text-[10px] font-black uppercase tracking-widest text-neutral-500">
+                          <Play className="w-2.5 h-2.5" /> Transcript
+                        </div>
+                        <div className="flex-1 rounded-xl bg-transparent border-l-2 border-white/5 pl-4 max-h-[250px] overflow-y-auto custom-scrollbar">
+                          <div className="text-xs font-medium text-neutral-300 leading-relaxed">
+                            {/* Rendering words (in a real scenario, filter based on clip start/end) */}
+                            {transcript?.words?.map((w: any, id: number) => <span key={id} className="hover:text-white transition-colors cursor-default">{w.word} </span>)}
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
+
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+
+  const dashboardView = (
+    <main className="min-h-screen bg-black text-white font-sans flex flex-col items-center justify-center p-8 transition-all duration-700">
+
+      {/* BRANDING */}
+      <div className="mb-12 flex flex-col items-center">
+        <h1 className="text-5xl font-bold tracking-tighter uppercase text-white">RocotoClip</h1>
+      </div>
+
+      {/* INPUT AREA */}
+      <div className="w-full max-w-2xl relative z-10">
+        <div className="bg-[#0a0a0a] rounded-[2.5rem] border border-white/10 p-2 shadow-[0_0_100px_rgba(255,255,255,0.02)]">
+          <div className="relative group">
+            <div className="absolute left-8 top-1/2 -translate-y-1/2 text-neutral-600 group-focus-within:text-white transition-colors duration-300">
+              <LinkIcon className="w-5 h-5" />
+            </div>
+            <input
+              type="text"
+              placeholder="Drop a YouTube link"
+              className="w-full bg-transparent border-none px-20 py-10 text-xl font-medium outline-none placeholder:text-neutral-700 transition-all"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleProcess()}
+            />
+          </div>
+
+          <div className="flex items-center justify-between px-8 py-6 border-t border-white/5 bg-black/40 rounded-b-[2.3rem]">
+            <div className="flex gap-6">
+              <button className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-neutral-500 hover:text-white transition-all">
+                <Upload className="w-4 h-4" /> Upload
+              </button>
+              <button className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-neutral-500 hover:text-white transition-all">
+                <Cloud className="w-4 h-4" /> Google Drive
+              </button>
+            </div>
+
+            <button
+              onClick={handleProcess}
+              disabled={status.status !== 'idle' && status.status !== 'failed'}
+              className="bg-white text-black px-12 py-5 rounded-[1.5rem] font-black uppercase text-[12px] tracking-tighter hover:bg-neutral-200 transition-all shadow-[0_10px_40px_rgba(255,255,255,0.1)] active:scale-95 disabled:opacity-30"
+            >
+              {status.status === 'idle' || status.status === 'failed' ? 'Get clips in 1 click' : 'Analyzing...'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* PROJECTS CONTAINER */}
+      {(status.status !== 'idle' || transcript) && (
+        <div className="mt-16 w-full max-w-2xl grid grid-cols-2 gap-6 animate-in fade-in slide-in-from-bottom-8 duration-700">
+          <div
+            onClick={() => transcript && setView('results')}
+            className={`relative group h-48 rounded-[2rem] border overflow-hidden p-6 flex flex-col justify-end transition-all cursor-pointer ${transcript ? 'bg-neutral-900 border-white/10 hover:border-white/30' : status.status === 'failed' ? 'bg-red-500/5 border-red-500/20' : 'bg-black border-white/5'}`}
+          >
+            {status.status === 'failed' && <div className="absolute inset-0 bg-red-500/5 z-0" />}
+            {transcript ? (
+              <div className="absolute inset-0 bg-gradient-to-t from-black via-black/20 to-transparent z-10" />
+            ) : (
+              <div className="absolute inset-0 bg-[#050505] animate-pulse z-0" />
+            )}
+
+            {/* Fake thumbnail content */}
+            <div className="absolute inset-0 flex items-center justify-center opacity-10">
+              <Video className="w-24 h-24" />
+            </div>
+
+            <div className="relative z-20">
+              <h4 className={`text-xs font-black uppercase tracking-widest mb-1 ${status.status === 'failed' ? 'text-red-500' : 'text-white/50'}`}>
+                {transcript ? 'Current Project' : status.status === 'failed' ? 'Pipeline Failed' : 'Processing...'}
+              </h4>
+              <p className={`text-sm font-bold truncate max-w-[200px] ${status.status === 'failed' ? 'text-red-400' : 'text-white'}`}>
+                {transcript?.clips?.[0]?.title || url || 'Inbound Video Job'}
+              </p>
+            </div>
+
+            {/* Progress/Loading Bar at the bottom */}
+            {!transcript && (
+              <div className="absolute bottom-0 left-0 right-0 h-1 bg-white/5 overflow-hidden">
+                <div className="h-full bg-white transition-all duration-1000" style={{ width: `${status.progress}%` }} />
               </div>
             )}
-          </div>
-
-          {/* Pro Inspector */}
-          <div className="w-[450px] bg-[#0c0c0c] flex flex-col border-l border-white/5 shadow-2xl overflow-hidden relative z-20">
-            {showTranscriptEditor ? (
-              <div className="flex-1 flex flex-col bg-black/40">
-                <div className="p-10 border-b border-white/5 bg-black/20">
-                  <h2 className="text-2xl font-black uppercase tracking-tighter italic text-indigo-400 mb-2">Word Lab</h2>
-                  <p className="text-[10px] text-neutral-600 font-bold uppercase tracking-widest">Edit phrases or delete hallucinations</p>
-                </div>
-                <div className="flex-1 overflow-y-auto p-8 space-y-3 custom-scrollbar">
-                  {transcript?.words?.map((w: any, idx: number) => (
-                    <div key={idx} className={`group flex items-center gap-4 p-4 rounded-2xl border transition-all ${currentTime >= w.start && currentTime <= w.end ? 'bg-indigo-600/20 border-indigo-500 shadow-xl scale-[1.02]' : 'bg-black/40 border-white/5 opacity-40 hover:opacity-100'}`}>
-                      <div className="w-10 text-[9px] font-mono text-neutral-600">{w.start.toFixed(1)}s</div>
-                      <input className="flex-1 bg-transparent border-none text-xs font-black text-white focus:outline-none" value={w.word}
-                        onChange={(e) => { const nw = [...transcript.words]; nw[idx].word = e.target.value; setTranscript({ ...transcript, words: nw }); }}
-                        onBlur={() => saveToBackend(transcript)} />
-                      <button onClick={() => deleteWord(idx)} className="opacity-0 group-hover:opacity-100 p-2 hover:bg-red-500/20 rounded-lg text-red-500 transition-all"><Eraser className="w-4 h-4" /></button>
-                    </div>
-                  ))}
-                </div>
-                <div className="p-8 bg-indigo-900/10 border-t border-indigo-500/20 text-center"><button onClick={() => setShowTranscriptEditor(false)} className="text-[10px] font-black uppercase text-indigo-400 tracking-widest hover:text-white">Close Editor</button></div>
-              </div>
-            ) : (
-              <div className="flex-1 flex flex-col p-12 overflow-y-auto">
-                <div className="flex items-center justify-between mb-12">
-                  <h2 className="text-3xl font-black uppercase tracking-tighter italic">Clip Config</h2>
-                  <Settings className="w-6 h-6 text-neutral-700" />
-                </div>
-
-                {transcript ? (
-                  <div className="space-y-16">
-                    {/* Active Shot Box */}
-                    <div className="space-y-4">
-                      <label className="text-[10px] font-black uppercase tracking-[0.4em] text-neutral-600">Active Shot Definition</label>
-                      <div className="bg-black/40 p-6 rounded-[2rem] border border-white/5 flex flex-col gap-6">
-                        <div className="flex items-center justify-between">
-                          <div><div className="text-4xl font-black text-white">{activeSegmentIdx + 1} <span className="text-xl text-neutral-800">/ {transcript.framing_segments.length}</span></div></div>
-                          <button onClick={() => deleteSegment(activeSegmentIdx)} className="p-4 bg-red-600/5 hover:bg-red-600 border border-red-500/10 rounded-2xl text-red-500 hover:text-white transition-all"><Trash2 className="w-6 h-6" /></button>
-                        </div>
-
-                        <div className="pt-6 border-t border-white/5">
-                          <div className="flex items-center justify-between mb-4">
-                            <span className="text-[10px] font-bold uppercase text-purple-400 tracking-widest">Horizontal Center</span>
-                            <span className="text-xl font-mono font-black text-white">
-                              {((transcript.framing_segments?.[activeSegmentIdx]?.center || 0.5) * 100).toFixed(0)}%
-                            </span>
-                          </div>
-                          <input type="range" min="0" max="1" step="0.005" value={transcript.framing_segments?.[activeSegmentIdx]?.center || 0.5} onChange={(e) => updateSegmentCenter(activeSegmentIdx, parseFloat(e.target.value))}
-                            className="w-full h-3 bg-black border border-white/10 rounded-full appearance-none accent-purple-500 cursor-pointer shadow-lg hover:ring-8 ring-purple-600/10 transition-all" />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex-1 flex items-center justify-center opacity-20"><Cpu className="w-16 h-16" /></div>
-                )}
-
-                <div className="mt-auto pt-16 space-y-8">
-                  {status.status === 'failed' ? (
-                    <div className="p-6 bg-red-500/10 border border-red-500/20 rounded-[2.5rem] flex flex-col items-center justify-center text-center">
-                      <div className="text-[9px] font-black uppercase text-red-500 mb-2 tracking-[0.2em]">Pipeline Failed</div>
-                      <div className="text-xs font-bold text-red-400 break-words">{status.error || 'Unknown Error'}</div>
-                    </div>
-                  ) : status.status !== 'idle' ? (
-                    <>
-                      <div className="p-6 bg-white/5 border border-white/5 rounded-[2.5rem] flex items-center justify-between">
-                        <div><div className="text-[9px] font-black uppercase text-neutral-600 mb-1">Engine Load</div><div className="text-xl font-black text-white/80">{status.progress}%</div></div>
-                        <div className="w-32 h-1.5 bg-black rounded-full overflow-hidden"><div className="h-full bg-purple-600 transition-all duration-700" style={{ width: `${status.progress}%` }} /></div>
-                      </div>
-                      <p className="text-[10px] text-neutral-500 font-bold leading-relaxed px-4 break-words">{status.message}</p>
-                    </>
-                  ) : null}
-                </div>
+            {transcript && (
+              <div className="absolute top-6 right-6 z-20 p-2 bg-purple-600 rounded-full shadow-2xl scale-0 group-hover:scale-100 transition-transform">
+                <ChevronRight className="w-4 h-4" />
               </div>
             )}
           </div>
         </div>
-        <style jsx global>{`
+      )}
+
+      {/* ERROR FOOTER */}
+      {status.status === 'failed' && (
+        <div className="mt-8 w-full max-w-2xl animate-in fade-in slide-in-from-top-4 duration-500">
+          <div className="bg-red-500/10 border border-red-500/20 px-8 py-6 rounded-[2.5rem] flex items-center justify-between gap-6">
+            <div className="flex items-center gap-4">
+              <ShieldAlert className="w-6 h-6 text-red-500" />
+              <div className="flex flex-col">
+                <span className="text-[10px] font-black uppercase text-red-500 tracking-widest">Aviso del Sistema</span>
+                <span className="text-xs font-bold text-red-400/80 leading-relaxed">Hubo un fallo en el proceso, estamos trabajando para solucionarlo.</span>
+              </div>
+            </div>
+            <button
+              onClick={handleReset}
+              className="px-6 py-3 bg-red-500/20 hover:bg-red-500/40 text-red-500 text-[9px] font-black uppercase rounded-xl transition-all"
+            >
+              Reintentar
+            </button>
+          </div>
+        </div>
+      )}
+    </main>
+  );
+
+  const editorView = (
+    <main className="min-h-screen bg-black text-white font-sans flex flex-col">
+      <nav className="border-b border-white/10 px-8 flex items-center justify-between h-16">
+        <div className="flex items-center gap-4">
+          <button onClick={() => setView('results')} className="p-2 hover:bg-white/5 rounded-full transition-all">
+            <ChevronRight className="w-5 h-5 rotate-180" />
+          </button>
+          <h1 className="text-xl font-bold tracking-tighter uppercase">RocotoClip <span className="text-neutral-500">Editor</span></h1>
+        </div>
+        <div className="flex items-center gap-6">
+          <button onClick={handleReset} className="text-[10px] font-bold uppercase text-neutral-500 hover:text-red-500 transition-colors flex items-center gap-2">
+            <RotateCcw className="w-3 h-3" /> Reset Project
+          </button>
+          <button className="bg-white text-black px-6 py-2 rounded-xl text-[10px] font-black uppercase hover:bg-neutral-200 transition-all">
+            Final Render
+          </button>
+        </div>
+      </nav>
+
+      <div className="flex-1 flex overflow-hidden">
+        {/* Left Area: Video + Timeline Floor */}
+        <div className="flex-1 flex flex-col bg-[#050505] overflow-hidden border-r border-white/5">
+
+          {/* Main Video Area */}
+          <div className="flex-1 flex items-center justify-center min-h-0 p-8">
+            <div className="h-full aspect-[9/16] bg-black rounded-[2rem] overflow-hidden shadow-2xl border border-white/5">
+              <Player ref={playerRef} component={Main} durationInFrames={Math.ceil((transcript?.duration || 30) * 30)}
+                compositionWidth={1080} compositionHeight={1920} fps={30} style={{ width: '100%', height: '100%' }} controls
+                inputProps={{ transcript, isPlayer: true }} />
+            </div>
+          </div>
+
+          {/* Bottom Timeline Rack */}
+          <div className="h-56 bg-[#0a0a0a] border-t border-white/5 flex flex-col p-6 shadow-2xl z-10">
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-[10px] uppercase tracking-widest font-black text-neutral-500 flex items-center gap-2">
+                <Scissors className="w-3 h-3" /> Rocoto Timeline
+              </span>
+              <div className="flex gap-4">
+                <span className="text-[10px] text-neutral-600 font-bold">Start: {(transcript?.clips?.[selectedClipIdx]?.start || 0).toFixed(2)}s</span>
+                <span className="text-[10px] text-neutral-600 font-bold">End: {(transcript?.clips?.[selectedClipIdx]?.end || transcript?.duration || 0).toFixed(2)}s</span>
+              </div>
+            </div>
+
+            {/* Tracks Representation */}
+            <div className="flex-1 rounded-xl bg-black border border-white/5 relative overflow-x-auto overflow-y-hidden custom-scrollbar flex flex-col py-2 px-4 gap-2">
+
+              {/* Visual Video Track Mockup */}
+              <div className="h-6 w-full bg-white/5 rounded-md flex items-center px-4 relative shrink-0">
+                <Video className="w-3 h-3 text-neutral-600 absolute left-2" />
+                <div className="w-full text-center text-[8px] text-neutral-700 tracking-widest font-bold">BASE VIDEO LAYER</div>
+              </div>
+
+              {/* Emojis Track */}
+              <div className="h-10 w-full bg-purple-900/10 rounded-md border border-purple-500/10 flex items-center px-8 relative shrink-0">
+                <Zap className="w-3 h-3 text-purple-600 absolute left-2" />
+                <div className="flex gap-2 w-full max-w-full overflow-x-auto custom-scrollbar items-center">
+                  {(transcript?.clips?.[selectedClipIdx]?.edit_events?.icons || transcript?.edit_events?.icons || []).map((icon: any, idx: number) => (
+                    <div key={idx} className="flex items-center gap-2 bg-purple-500/20 px-3 py-1 rounded-md text-[10px] font-black uppercase text-purple-300 border border-purple-500/30 whitespace-nowrap">
+                      <span>{icon.keyword} ({parseFloat(icon.time).toFixed(1)}s)</span>
+                      <button onClick={(e) => { e.stopPropagation(); removeEmoji(idx); }} className="p-0.5 hover:bg-black/50 rounded-full text-red-400 opacity-50 hover:opacity-100 transition-opacity">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Words Track */}
+              <div className="h-6 w-full bg-blue-900/10 rounded-md border border-blue-500/10 flex items-center px-4 relative shrink-0 overflow-hidden">
+                <div className="w-full flex truncate items-center opacity-30 px-6 gap-1">
+                  {transcript?.words?.map((w: any, idx: number) => <span key={idx} className="text-[8px] border-l border-white/10 px-1 truncate">{w.word}</span>)}
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        <div className="w-[350px] bg-[#020202] py-8 pr-8 pl-8 overflow-y-auto flex flex-col gap-10 custom-scrollbar z-20">
+          <h2 className="text-xs font-black uppercase tracking-widest text-neutral-600 italic">Overrides & Control</h2>
+
+          {/* Timeline / Cuts Control */}
+          <section className="space-y-4">
+            <div className="flex items-center gap-2 text-[10px] font-black uppercase text-neutral-500 tracking-widest">
+              <Scissors className="w-3 h-3" /> Timeline Cuts
+            </div>
+            <div className="p-6 bg-[#0a0a0a] border border-white/5 rounded-2xl flex flex-col gap-4">
+              <div className="flex justify-between items-center text-xs text-neutral-400 font-bold">
+                <span>Start:</span>
+                <span className="text-white bg-white/5 px-2 py-1 rounded">
+                  {(transcript?.clips?.[selectedClipIdx]?.start || 0).toFixed(2)}s
+                </span>
+              </div>
+              <div className="flex justify-between items-center text-xs text-neutral-400 font-bold">
+                <span>End:</span>
+                <span className="text-white bg-white/5 px-2 py-1 rounded">
+                  {(transcript?.clips?.[selectedClipIdx]?.end || transcript?.duration || 0).toFixed(2)}s
+                </span>
+              </div>
+              <button className="w-full mt-2 py-3 border border-white/10 hover:bg-white/10 text-white rounded-xl text-[9px] font-black uppercase tracking-widest transition-all">
+                Fine Tune Duration
+              </button>
+            </div>
+          </section>
+
+
+
+          {/* Framing / Crop Center */}
+          <section className="space-y-6">
+            <div className="flex items-center gap-2 text-[10px] font-black uppercase text-neutral-500 tracking-widest">
+              <Layout className="w-3 h-3" /> AI Framing Center
+            </div>
+            <div className="p-6 bg-[#0a0a0a] border border-white/5 rounded-2xl space-y-6">
+              <div className="flex justify-between items-end">
+                <span className="text-[9px] uppercase font-bold text-neutral-500 tracking-widest">Offset X</span>
+                <span className="text-lg font-black text-white">{((transcript?.center || 0.5) * 100).toFixed(0)}%</span>
+              </div>
+              <input type="range" min="0" max="1" step="0.01" value={transcript?.center || 0.5}
+                onChange={(e) => setTranscript({ ...transcript, center: parseFloat(e.target.value) })}
+                className="w-full accent-white h-2 bg-neutral-900 rounded-full appearance-none" />
+            </div>
+          </section>
+        </div>
+      </div>
+    </main>
+  );
+
+  return (
+    <GlobalErrorBoundary>
+      {view === 'dashboard' && dashboardView}
+      {view === 'results' && resultsLayout}
+      {view === 'editor' && editorView}
+      <style jsx global>{`
+        body { background: black; }
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
-        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 36px; width: 16px; border-radius: 6px; background: #A855F7; border: 3px solid #fff; cursor: pointer; box-shadow: 0 0 20px rgba(168,85,247,0.5); }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 24px; width: 24px; border-radius: 50%; background: #ffffff; cursor: pointer; border: 4px solid #000; box-shadow: 0 0 15px rgba(255,255,255,0.3); }
       `}</style>
-      </main>
     </GlobalErrorBoundary>
   );
 }
