@@ -7,11 +7,21 @@ remotion-app/node_modules/
 remotion-app/out/
 remotion-app/out.mp4
 out.mp4
+
+# Media and Data
 *.mp4
+*.wav
 temp_video.mp4
 input_full.mp4
 output_vertical_clip.mp4
 framing_proxy.mp4
+transcript_*.json
+video_*.mp4
+audio_*.wav
+
+# JSON Data
+transcript_data.json
+remotion-app/src/transcript_data.json
 
 # Environment and Logs
 .env
@@ -26,14 +36,9 @@ __pycache__/
 venv/
 ENV/
 
-# JSON Data (Optional, but often dynamic)
-transcript_data.json
-remotion-app/src/transcript_data.json
-
 # Local images/checkpoints
-*.jpg
-*.png
 blaze_face_short_range.tflite
+efficientdet_lite0.tflite
 
 # OS
 .DS_Store
