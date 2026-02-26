@@ -29,8 +29,71 @@ import {
   RotateCcw,
   Type,
   Check,
-  Eraser
+  Eraser,
+  AlertTriangle,
+  ShieldAlert
 } from 'lucide-react';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+
+// --- ERROR LOGGING HELPER ---
+const logErrorToBackend = async (error: any, context?: string) => {
+  try {
+    await fetch(`${API_BASE}/api/log-error`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: error.message || String(error),
+        stack: error.stack,
+        context: context || 'General UI Error',
+        url: window.location.href,
+        userAgent: navigator.userAgent
+      })
+    });
+  } catch (err) {
+    console.error("Critical: Failed to report error to backend", err);
+  }
+};
+
+// --- ERROR BOUNDARY COMPONENT ---
+class GlobalErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    logErrorToBackend(error, errorInfo.componentStack);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-[#050505] flex flex-col items-center justify-center p-8 text-center">
+          <div className="w-24 h-24 bg-red-500/10 rounded-[2rem] flex items-center justify-center mb-10 border border-red-500/20 shadow-[0_0_50px_rgba(239,68,68,0.1)]">
+            <ShieldAlert className="w-10 h-10 text-red-500" />
+          </div>
+          <h1 className="text-3xl font-black uppercase tracking-tighter mb-4 text-white">System Encountered a Hiccup</h1>
+          <p className="text-neutral-500 max-w-md text-sm leading-relaxed mb-10 font-medium">
+            We apologize for the inconvenience. A technical anomaly has been captured and sent to our engineering team for immediate review.
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            className="px-10 py-4 bg-white text-black text-[10px] font-black uppercase tracking-[0.2em] rounded-2xl hover:bg-purple-600 hover:text-white transition-all shadow-2xl active:scale-95"
+          >
+            Restart Application
+          </button>
+          <p className="mt-12 text-[9px] text-neutral-800 font-bold uppercase tracking-[0.5em]">Antigravity Engine • Error ID: {Math.random().toString(36).substr(2, 9).toUpperCase()}</p>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export default function Home() {
   const [url, setUrl] = useState('');
@@ -57,7 +120,7 @@ export default function Home() {
 
   const checkInitialStatus = async () => {
     try {
-      const transRes = await fetch('http://127.0.0.1:8000/api/transcript');
+      const transRes = await fetch(`${API_BASE}/api/transcript`);
       const transData = await transRes.json();
       if (transData && !transData.error) {
         if (!transData.framing_segments) {
@@ -77,7 +140,7 @@ export default function Home() {
     if (status.status !== 'idle' && status.status !== 'completed' && status.status !== 'failed') {
       interval = setInterval(async () => {
         try {
-          const res = await fetch('http://127.0.0.1:8000/api/status');
+          const res = await fetch(`${API_BASE}/api/status`);
           const data = await res.json();
           setStatus(data);
 
@@ -90,6 +153,12 @@ export default function Home() {
     }
     return () => clearInterval(interval);
   }, [status.status]);
+
+  useEffect(() => {
+    if (transcript?.framing_segments && activeSegmentIdx >= transcript.framing_segments.length) {
+      setActiveSegmentIdx(0);
+    }
+  }, [transcript, activeSegmentIdx]);
 
   useEffect(() => {
     const player = playerRef.current;
@@ -127,37 +196,55 @@ export default function Home() {
       return;
     }
     try {
-      const res = await fetch('http://127.0.0.1:8000/api/process', {
+      // CLEAR OLD PROJECT STATE IMMEDIATELY
+      setTranscript(null);
+      setActiveSegmentIdx(0);
+      setCurrentTime(0);
+      setPreviewKey(prev => prev + 1);
+
+      const res = await fetch(`${API_BASE}/api/process`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url })
       });
       setStatus({ status: 'processing', progress: 0, message: 'Waking up engine...', error: null });
-    } catch (err: any) { setStatus({ ...status, status: 'failed', error: err.message }); }
+    } catch (err: any) {
+      logErrorToBackend(err, 'handleProcess');
+      setStatus({ ...status, status: 'failed', error: 'Internal Engine Communication Error' });
+    }
   };
 
   const handleReset = async () => {
     if (!confirm("HARD RESET: Deleting all project data and temporary files. Continue?")) return;
     try {
-      await fetch('http://127.0.0.1:8000/api/reset', { method: 'POST' });
+      await fetch(`${API_BASE}/api/reset`, { method: 'POST' });
       setTranscript(null); setUrl('');
       setStatus({ status: 'idle', progress: 0, message: 'Project Cleared', error: null });
-    } catch (err) { console.error("Reset failed"); }
+    } catch (err: any) {
+      logErrorToBackend(err, 'handleReset');
+      alert("System Reset failed. Please try again or contact administrator.");
+    }
   };
 
   const handleRender = async () => {
     try {
-      await fetch('http://127.0.0.1:8000/api/render', { method: 'POST' });
+      await fetch(`${API_BASE}/api/render`, { method: 'POST' });
       setStatus({ status: 'rendering', progress: 10, message: 'Generating Final Clip...', error: null });
-    } catch (err: any) { setStatus({ ...status, status: 'failed', error: err.message }); }
+    } catch (err: any) {
+      logErrorToBackend(err, 'handleRender');
+      setStatus({ ...status, status: 'failed', error: 'Server Render Engine Timeout' });
+    }
   };
 
   const saveToBackend = async (data: any) => {
     try {
-      await fetch('http://127.0.0.1:8000/api/update-framing', {
+      await fetch(`${API_BASE}/api/update-framing`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
       });
-    } catch (err) { console.error("Update failed", err); }
+    } catch (err: any) {
+      logErrorToBackend(err, 'saveToBackend');
+      console.error("Auto-save failed");
+    }
   };
 
   const updateSegmentCenter = (idx: number, center: number) => {
@@ -180,8 +267,9 @@ export default function Home() {
     // Deletes VFX elements that occur within the active segment
     if (!transcript) return;
     const seg = transcript.framing_segments[activeSegmentIdx];
-    const newZooms = transcript.edit_events.zooms.filter((z: any) => z.time < seg.start || z.time > seg.end);
-    const newIcons = transcript.edit_events.icons.filter((i: any) => i.time < seg.start || i.time > seg.end);
+    if (!seg) return;
+    const newZooms = (transcript.edit_events?.zooms || []).filter((z: any) => z.time < seg.start || z.time > seg.end);
+    const newIcons = (transcript.edit_events?.icons || []).filter((i: any) => i.time < seg.start || i.time > seg.end);
 
     const updated = {
       ...transcript,
@@ -239,212 +327,219 @@ export default function Home() {
   }, [transcript]);
 
   return (
-    <main className="min-h-screen bg-[#020202] text-neutral-100 font-sans selection:bg-purple-500/30 overflow-hidden flex flex-col">
-      <div className="fixed inset-0 pointer-events-none opacity-20" style={{ backgroundImage: 'url("https://grainy-gradients.vercel.app/noise.svg")' }} />
+    <GlobalErrorBoundary>
+      <main className="min-h-screen bg-[#020202] text-neutral-100 font-sans selection:bg-purple-500/30 overflow-hidden flex flex-col">
+        <div className="fixed inset-0 pointer-events-none opacity-20" style={{ backgroundImage: 'url("https://grainy-gradients.vercel.app/noise.svg")' }} />
 
-      {/* Navbar */}
-      <nav className="relative z-50 border-b border-white/5 bg-black/60 backdrop-blur-3xl px-8 flex items-center justify-between h-16 shadow-2xl">
-        <div className="flex items-center gap-5">
-          <div className="w-10 h-10 bg-gradient-to-tr from-purple-600 via-indigo-500 to-blue-500 rounded-[12px] flex items-center justify-center shadow-2xl shadow-purple-500/30 ring-1 ring-white/20">
-            <Zap className="w-5 h-5 text-white fill-current" />
+        {/* Navbar */}
+        <nav className="relative z-50 border-b border-white/5 bg-black/60 backdrop-blur-3xl px-8 flex items-center justify-between h-16 shadow-2xl">
+          <div className="flex items-center gap-5">
+            <div className="w-10 h-10 bg-gradient-to-tr from-purple-600 via-indigo-500 to-blue-500 rounded-[12px] flex items-center justify-center shadow-2xl shadow-purple-500/30 ring-1 ring-white/20">
+              <Zap className="w-5 h-5 text-white fill-current" />
+            </div>
+            <div className="flex flex-col">
+              <span className="text-lg font-black tracking-tighter uppercase leading-none">Antigravity <span className="text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-400">PRO V5.0</span></span>
+              <span className="text-[9px] text-neutral-600 font-bold tracking-[0.3em] uppercase mt-1">Master Editor Engine</span>
+            </div>
           </div>
-          <div className="flex flex-col">
-            <span className="text-lg font-black tracking-tighter uppercase leading-none">Antigravity <span className="text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-400">PRO V5.0</span></span>
-            <span className="text-[9px] text-neutral-600 font-bold tracking-[0.3em] uppercase mt-1">Master Editor Engine</span>
+
+          <div className="flex items-center gap-8">
+            <button onClick={handleReset} disabled={!transcript && status.status === 'idle'} className={`flex items-center gap-2 text-[10px] font-black uppercase tracking-widest transition-all group ${(!transcript && status.status === 'idle') ? 'text-neutral-700 cursor-not-allowed' : 'text-neutral-500 hover:text-red-400'}`}>
+              <RotateCcw className={`w-4 h-4 ${(!transcript && status.status === 'idle') ? '' : 'group-hover:rotate-[-45deg]'} transition-transform`} /> Emergency Reset
+            </button>
+            <div className="h-4 w-px bg-white/10" />
+            <button onClick={handleRender} disabled={!transcript || status.status === 'rendering'} className={`text-[10px] font-black uppercase tracking-widest px-8 py-3 rounded-2xl transition-all shadow-xl active:scale-95 ${!transcript ? 'bg-white/10 text-white/20 cursor-not-allowed' : 'bg-white text-black hover:bg-purple-500 hover:text-white disabled:opacity-30'}`}>
+              {status.status === 'rendering' ? 'Rendering...' : 'Finalize & Render'}
+            </button>
           </div>
-        </div>
+        </nav>
 
-        <div className="flex items-center gap-8">
-          <button onClick={handleReset} disabled={!transcript && status.status === 'idle'} className={`flex items-center gap-2 text-[10px] font-black uppercase tracking-widest transition-all group ${(!transcript && status.status === 'idle') ? 'text-neutral-700 cursor-not-allowed' : 'text-neutral-500 hover:text-red-400'}`}>
-            <RotateCcw className={`w-4 h-4 ${(!transcript && status.status === 'idle') ? '' : 'group-hover:rotate-[-45deg]'} transition-transform`} /> Emergency Reset
-          </button>
-          <div className="h-4 w-px bg-white/10" />
-          <button onClick={handleRender} disabled={!transcript || status.status === 'rendering'} className={`text-[10px] font-black uppercase tracking-widest px-8 py-3 rounded-2xl transition-all shadow-xl active:scale-95 ${!transcript ? 'bg-white/10 text-white/20 cursor-not-allowed' : 'bg-white text-black hover:bg-purple-500 hover:text-white disabled:opacity-30'}`}>
-            {status.status === 'rendering' ? 'Rendering...' : 'Finalize & Render'}
-          </button>
-        </div>
-      </nav>
+        <div className="relative z-10 flex-1 flex overflow-hidden">
+          {/* Workspace Body */}
+          <div className="flex-1 flex flex-col bg-[#050505] border-r border-white/5 relative">
 
-      <div className="relative z-10 flex-1 flex overflow-hidden">
-        {/* Workspace Body */}
-        <div className="flex-1 flex flex-col bg-[#050505] border-r border-white/5 relative">
-
-          <div className="flex-1 flex items-center justify-center p-8">
-            <div className={`h-[calc(100vh-360px)] aspect-[9/16] bg-black rounded-3xl overflow-hidden shadow-[0_0_120px_rgba(0,0,0,1)] border border-white/10 relative transition-all duration-500`}>
-              {transcript ? (
-                <Player ref={playerRef} key={previewKey} component={Main} durationInFrames={Math.ceil(getDuration() * 30)}
-                  compositionWidth={1080}
-                  compositionHeight={1920}
-                  fps={30} style={{ width: '100%', height: '100%' }} controls
-                  inputProps={inputProps} />
-              ) : (
-                <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-12">
-                  <div className="w-16 h-16 bg-white/5 rounded-3xl flex items-center justify-center mb-8 border border-white/10 animate-pulse">
-                    <Youtube className="w-8 h-8 text-neutral-700" />
+            <div className="flex-1 flex items-center justify-center p-8">
+              <div className={`h-[calc(100vh-360px)] aspect-[9/16] bg-black rounded-3xl overflow-hidden shadow-[0_0_120px_rgba(0,0,0,1)] border border-white/10 relative transition-all duration-500`}>
+                {transcript ? (
+                  <Player ref={playerRef} key={previewKey} component={Main} durationInFrames={Math.ceil(getDuration() * 30)}
+                    compositionWidth={1080}
+                    compositionHeight={1920}
+                    fps={30} style={{ width: '100%', height: '100%' }} controls
+                    inputProps={inputProps} />
+                ) : (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-12">
+                    <div className="w-16 h-16 bg-white/5 rounded-3xl flex items-center justify-center mb-8 border border-white/10 animate-pulse">
+                      <Youtube className="w-8 h-8 text-neutral-700" />
+                    </div>
+                    <h3 className="text-xl font-black uppercase tracking-tighter mb-4 text-white/50">Ready for Input</h3>
+                    <div className="w-full max-w-sm space-y-4">
+                      <input type="text" placeholder="Paste Video Link..." className="w-full bg-black/60 border border-white/10 rounded-2xl px-6 py-4 text-xs font-mono focus:ring-2 focus:ring-purple-500/50 outline-none transition-all placeholder:text-neutral-700" value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && (status.status === 'idle' || status.status === 'failed') && handleProcess()} disabled={status.status !== 'idle' && status.status !== 'failed'} />
+                      <button onClick={handleProcess} disabled={(status.status !== 'idle' && status.status !== 'failed') || !url.trim()} className="w-full bg-purple-600 text-white py-4 rounded-3xl font-black uppercase text-[10px] tracking-widest hover:bg-purple-500 transition-all shadow-2xl disabled:opacity-50 disabled:cursor-not-allowed transition-opacity duration-300">
+                        {status.status === 'idle' || status.status === 'failed' ? 'Load Engine' : 'Processing...'}
+                      </button>
+                    </div>
                   </div>
-                  <h3 className="text-xl font-black uppercase tracking-tighter mb-4 text-white/50">Ready for Input</h3>
-                  <div className="w-full max-w-sm space-y-4">
-                    <input type="text" placeholder="Paste Video Link..." className="w-full bg-black/60 border border-white/10 rounded-2xl px-6 py-4 text-xs font-mono focus:ring-2 focus:ring-purple-500/50 outline-none transition-all placeholder:text-neutral-700" value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && (status.status === 'idle' || status.status === 'failed') && handleProcess()} disabled={status.status !== 'idle' && status.status !== 'failed'} />
-                    <button onClick={handleProcess} disabled={(status.status !== 'idle' && status.status !== 'failed') || !url.trim()} className="w-full bg-purple-600 text-white py-4 rounded-3xl font-black uppercase text-[10px] tracking-widest hover:bg-purple-500 transition-all shadow-2xl disabled:opacity-50 disabled:cursor-not-allowed transition-opacity duration-300">
-                      {status.status === 'idle' || status.status === 'failed' ? 'Load Engine' : 'Processing...'}
-                    </button>
-                  </div>
+                )}
+              </div>
+
+              {/* View Mode Switcher Removed - Only 9:16 Output Mode is allowed now */}
+
+              {transcript && (
+                <div className="absolute top-12 right-12 flex flex-col gap-4">
+                  <button onClick={() => setShowTranscriptEditor(prev => !prev)} className={`p-4 rounded-3xl border transition-all ${showTranscriptEditor ? 'bg-indigo-600 border-indigo-400 shadow-xl' : 'bg-black/60 border-white/10 text-neutral-500 hover:text-white'}`}>
+                    <Type className="w-6 h-6" />
+                  </button>
                 </div>
               )}
             </div>
 
-            {/* View Mode Switcher Removed - Only 9:16 Output Mode is allowed now */}
-
+            {/* New Multi-Track Timeline */}
             {transcript && (
-              <div className="absolute top-12 right-12 flex flex-col gap-4">
-                <button onClick={() => setShowTranscriptEditor(prev => !prev)} className={`p-4 rounded-3xl border transition-all ${showTranscriptEditor ? 'bg-indigo-600 border-indigo-400 shadow-xl' : 'bg-black/60 border-white/10 text-neutral-500 hover:text-white'}`}>
-                  <Type className="w-6 h-6" />
-                </button>
+              <div className="h-64 bg-black/80 backdrop-blur-3xl border-t border-white/10 p-6 flex flex-col gap-4">
+                <div className="flex items-center gap-8">
+                  <div className="text-4xl font-mono font-black text-white/90 tabular-nums w-48">{Math.floor(currentTime / 60)}:{(currentTime % 60).toFixed(2).padStart(5, '0')}</div>
+                  <button onClick={addCut} className="bg-gradient-to-r from-purple-600 to-indigo-600 text-white px-8 py-3 rounded-2xl font-black uppercase text-[11px] tracking-widest active:scale-95 shadow-2xl hover:brightness-125 transition-all flex items-center gap-3">
+                    <Scissors className="w-5 h-5" /> Cut
+                  </button>
+                </div>
+
+                {/* TRACKS CONTAINER */}
+                <div
+                  className="relative flex-1 flex flex-col gap-1 cursor-crosshair group touch-none"
+                  ref={timelineRef}
+                  onPointerDown={(e) => { setIsDragging(true); handleTimelineInteraction(e.clientX); e.currentTarget.setPointerCapture(e.pointerId); }}
+                  onPointerMove={(e) => { if (isDragging) handleTimelineInteraction(e.clientX); }}
+                  onPointerUp={(e) => { setIsDragging(false); e.currentTarget.releasePointerCapture(e.pointerId); }}
+                >
+                  {/* Global Playhead (Offset by 64px to match content) */}
+                  <div className="absolute top-0 bottom-0 left-16 right-0 pointer-events-none z-[100]">
+                    <div className="absolute top-0 bottom-0 w-[2px] bg-red-600 shadow-[0_0_15px_rgba(220,38,38,1)] transition-none" style={{ left: `${(currentTime / getDuration()) * 100}%` }}>
+                      <div className="w-4 h-4 bg-red-500 rounded-full absolute -top-2 -left-[7px] border-2 border-white shadow-[0_0_10px_rgba(239,68,68,0.8)]" />
+                    </div>
+                  </div>
+
+                  {/* TRACK 1: VFX & Emojis */}
+                  <div className="h-8 bg-white/5 rounded-lg border border-white/5 relative hover:bg-white/10 transition-all flex items-center overflow-hidden">
+                    <div className="absolute left-0 top-0 bottom-0 w-16 bg-black/80 border-r border-white/10 flex items-center justify-center text-[8px] font-black uppercase text-yellow-500 tracking-widest z-50">VFX</div>
+                    {transcript?.edit_events?.zooms?.map((z: any, idx: number) => (
+                      <div key={`z-${idx}`} className="absolute top-1 bottom-1 w-1 rounded bg-blue-500/80 shadow-[0_0_10px_rgba(59,130,246,0.6)]" style={{ left: `${(z.time / getDuration()) * 100}%` }} />
+                    ))}
+                    {transcript?.edit_events?.icons?.map((icon: any, idx: number) => (
+                      <div key={`i-${idx}`} className="absolute top-1 bottom-1 rounded bg-yellow-400/80 text-[8px] font-black px-1.5 flex items-center shadow-[0_0_10px_rgba(250,204,21,0.6)] whitespace-nowrap overflow-hidden text-black uppercase" style={{ left: `${(icon.time / getDuration()) * 100}%` }}>{icon.keyword}</div>
+                    ))}
+                  </div>
+
+                  {/* TRACK 2: Camera Cuts (Segments) */}
+                  <div className="h-14 bg-black/50 rounded-xl border border-white/5 relative hover:bg-[#0a0a0a] transition-all">
+                    <div className="absolute left-0 top-0 bottom-0 w-16 bg-black/80 border-r border-white/10 flex items-center justify-center text-[8px] font-black uppercase text-purple-400 tracking-widest z-50">Cams</div>
+                    <div className="absolute inset-0 left-16">
+                      {transcript?.framing_segments?.map((seg: any, idx: number) => (
+                        <div key={`c-${idx}`} onClick={(e) => { e.stopPropagation(); setActiveSegmentIdx(idx); playerRef.current?.seekTo(Math.round(seg.start * 30)); }}
+                          className={`absolute top-1 bottom-1 border-r border-black/40 rounded-[0.4rem] flex flex-col items-center justify-center cursor-pointer transition-all hover:brightness-150 ${activeSegmentIdx === idx ? 'bg-purple-600/40 border border-purple-500 shadow-[inset_0_0_20px_rgba(168,85,247,0.3)] z-10' : 'bg-white/5'}`}
+                          style={{ left: `${(seg.start / getDuration()) * 100}%`, width: `${((seg.end - seg.start) / getDuration()) * 100}%` }}>
+                          <span className="text-[9px] font-black text-white/50 mb-0.5">SHOT_{idx + 1}</span>
+                          <div className="w-1/2 h-[3px] bg-black rounded-full overflow-hidden"><div className="bg-purple-400 h-full w-[4px] rounded-full" style={{ marginLeft: `${seg.center * 100}%`, transform: 'translateX(-50%)' }} /></div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* TRACK 3: Audio/Subtitles Visualizer (Fake wave) */}
+                  <div className="h-6 bg-white/5 rounded-lg border border-white/5 relative hover:bg-white/10 transition-all overflow-hidden flex items-end">
+                    <div className="absolute left-0 top-0 bottom-0 w-16 bg-black/80 border-r border-white/10 flex items-center justify-center text-[8px] font-black uppercase text-indigo-400 tracking-widest z-50">Subs</div>
+                    <div className="absolute inset-0 left-16">
+                      {transcript?.words?.map((w: any, idx: number) => (
+                        <div key={`w-${idx}`} className={`absolute bottom-0 w-[2px] rounded-t-sm transition-all ${currentTime >= w.start && currentTime <= w.end ? 'bg-indigo-400 h-full' : 'bg-white/20'}`} style={{ left: `${(w.start / getDuration()) * 100}%`, height: `${20 + (Math.sin(idx * 5) * 50)}%` }} />
+                      ))}
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
           </div>
 
-          {/* New Multi-Track Timeline */}
-          {transcript && (
-            <div className="h-64 bg-black/80 backdrop-blur-3xl border-t border-white/10 p-6 flex flex-col gap-4">
-              <div className="flex items-center gap-8">
-                <div className="text-4xl font-mono font-black text-white/90 tabular-nums w-48">{Math.floor(currentTime / 60)}:{(currentTime % 60).toFixed(2).padStart(5, '0')}</div>
-                <button onClick={addCut} className="bg-gradient-to-r from-purple-600 to-indigo-600 text-white px-8 py-3 rounded-2xl font-black uppercase text-[11px] tracking-widest active:scale-95 shadow-2xl hover:brightness-125 transition-all flex items-center gap-3">
-                  <Scissors className="w-5 h-5" /> Cut
-                </button>
-              </div>
-
-              {/* TRACKS CONTAINER */}
-              <div
-                className="relative flex-1 flex flex-col gap-1 cursor-crosshair group touch-none"
-                ref={timelineRef}
-                onPointerDown={(e) => { setIsDragging(true); handleTimelineInteraction(e.clientX); e.currentTarget.setPointerCapture(e.pointerId); }}
-                onPointerMove={(e) => { if (isDragging) handleTimelineInteraction(e.clientX); }}
-                onPointerUp={(e) => { setIsDragging(false); e.currentTarget.releasePointerCapture(e.pointerId); }}
-              >
-                {/* Global Playhead (Offset by 64px to match content) */}
-                <div className="absolute top-0 bottom-0 left-16 right-0 pointer-events-none z-[100]">
-                  <div className="absolute top-0 bottom-0 w-[2px] bg-red-600 shadow-[0_0_15px_rgba(220,38,38,1)] transition-none" style={{ left: `${(currentTime / getDuration()) * 100}%` }}>
-                    <div className="w-4 h-4 bg-red-500 rounded-full absolute -top-2 -left-[7px] border-2 border-white shadow-[0_0_10px_rgba(239,68,68,0.8)]" />
-                  </div>
+          {/* Pro Inspector */}
+          <div className="w-[450px] bg-[#0c0c0c] flex flex-col border-l border-white/5 shadow-2xl overflow-hidden relative z-20">
+            {showTranscriptEditor ? (
+              <div className="flex-1 flex flex-col bg-black/40">
+                <div className="p-10 border-b border-white/5 bg-black/20">
+                  <h2 className="text-2xl font-black uppercase tracking-tighter italic text-indigo-400 mb-2">Word Lab</h2>
+                  <p className="text-[10px] text-neutral-600 font-bold uppercase tracking-widest">Edit phrases or delete hallucinations</p>
                 </div>
-
-                {/* TRACK 1: VFX & Emojis */}
-                <div className="h-8 bg-white/5 rounded-lg border border-white/5 relative hover:bg-white/10 transition-all flex items-center overflow-hidden">
-                  <div className="absolute left-0 top-0 bottom-0 w-16 bg-black/80 border-r border-white/10 flex items-center justify-center text-[8px] font-black uppercase text-yellow-500 tracking-widest z-50">VFX</div>
-                  {transcript?.edit_events?.zooms?.map((z: any, idx: number) => (
-                    <div key={`z-${idx}`} className="absolute top-1 bottom-1 w-1 rounded bg-blue-500/80 shadow-[0_0_10px_rgba(59,130,246,0.6)]" style={{ left: `${(z.time / getDuration()) * 100}%` }} />
-                  ))}
-                  {transcript?.edit_events?.icons?.map((icon: any, idx: number) => (
-                    <div key={`i-${idx}`} className="absolute top-1 bottom-1 rounded bg-yellow-400/80 text-[8px] font-black px-1.5 flex items-center shadow-[0_0_10px_rgba(250,204,21,0.6)] whitespace-nowrap overflow-hidden text-black uppercase" style={{ left: `${(icon.time / getDuration()) * 100}%` }}>{icon.keyword}</div>
+                <div className="flex-1 overflow-y-auto p-8 space-y-3 custom-scrollbar">
+                  {transcript?.words?.map((w: any, idx: number) => (
+                    <div key={idx} className={`group flex items-center gap-4 p-4 rounded-2xl border transition-all ${currentTime >= w.start && currentTime <= w.end ? 'bg-indigo-600/20 border-indigo-500 shadow-xl scale-[1.02]' : 'bg-black/40 border-white/5 opacity-40 hover:opacity-100'}`}>
+                      <div className="w-10 text-[9px] font-mono text-neutral-600">{w.start.toFixed(1)}s</div>
+                      <input className="flex-1 bg-transparent border-none text-xs font-black text-white focus:outline-none" value={w.word}
+                        onChange={(e) => { const nw = [...transcript.words]; nw[idx].word = e.target.value; setTranscript({ ...transcript, words: nw }); }}
+                        onBlur={() => saveToBackend(transcript)} />
+                      <button onClick={() => deleteWord(idx)} className="opacity-0 group-hover:opacity-100 p-2 hover:bg-red-500/20 rounded-lg text-red-500 transition-all"><Eraser className="w-4 h-4" /></button>
+                    </div>
                   ))}
                 </div>
-
-                {/* TRACK 2: Camera Cuts (Segments) */}
-                <div className="h-14 bg-black/50 rounded-xl border border-white/5 relative hover:bg-[#0a0a0a] transition-all">
-                  <div className="absolute left-0 top-0 bottom-0 w-16 bg-black/80 border-r border-white/10 flex items-center justify-center text-[8px] font-black uppercase text-purple-400 tracking-widest z-50">Cams</div>
-                  <div className="absolute inset-0 left-16">
-                    {transcript?.framing_segments?.map((seg: any, idx: number) => (
-                      <div key={`c-${idx}`} onClick={(e) => { e.stopPropagation(); setActiveSegmentIdx(idx); playerRef.current?.seekTo(Math.round(seg.start * 30)); }}
-                        className={`absolute top-1 bottom-1 border-r border-black/40 rounded-[0.4rem] flex flex-col items-center justify-center cursor-pointer transition-all hover:brightness-150 ${activeSegmentIdx === idx ? 'bg-purple-600/40 border border-purple-500 shadow-[inset_0_0_20px_rgba(168,85,247,0.3)] z-10' : 'bg-white/5'}`}
-                        style={{ left: `${(seg.start / getDuration()) * 100}%`, width: `${((seg.end - seg.start) / getDuration()) * 100}%` }}>
-                        <span className="text-[9px] font-black text-white/50 mb-0.5">SHOT_{idx + 1}</span>
-                        <div className="w-1/2 h-[3px] bg-black rounded-full overflow-hidden"><div className="bg-purple-400 h-full w-[4px] rounded-full" style={{ marginLeft: `${seg.center * 100}%`, transform: 'translateX(-50%)' }} /></div>
-                      </div>
-                    ))}
-                  </div>
+                <div className="p-8 bg-indigo-900/10 border-t border-indigo-500/20 text-center"><button onClick={() => setShowTranscriptEditor(false)} className="text-[10px] font-black uppercase text-indigo-400 tracking-widest hover:text-white">Close Editor</button></div>
+              </div>
+            ) : (
+              <div className="flex-1 flex flex-col p-12 overflow-y-auto">
+                <div className="flex items-center justify-between mb-12">
+                  <h2 className="text-3xl font-black uppercase tracking-tighter italic">Clip Config</h2>
+                  <Settings className="w-6 h-6 text-neutral-700" />
                 </div>
 
-                {/* TRACK 3: Audio/Subtitles Visualizer (Fake wave) */}
-                <div className="h-6 bg-white/5 rounded-lg border border-white/5 relative hover:bg-white/10 transition-all overflow-hidden flex items-end">
-                  <div className="absolute left-0 top-0 bottom-0 w-16 bg-black/80 border-r border-white/10 flex items-center justify-center text-[8px] font-black uppercase text-indigo-400 tracking-widest z-50">Subs</div>
-                  <div className="absolute inset-0 left-16">
-                    {transcript?.words?.map((w: any, idx: number) => (
-                      <div key={`w-${idx}`} className={`absolute bottom-0 w-[2px] rounded-t-sm transition-all ${currentTime >= w.start && currentTime <= w.end ? 'bg-indigo-400 h-full' : 'bg-white/20'}`} style={{ left: `${(w.start / getDuration()) * 100}%`, height: `${20 + (Math.sin(idx * 5) * 50)}%` }} />
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
+                {transcript ? (
+                  <div className="space-y-16">
+                    {/* Active Shot Box */}
+                    <div className="space-y-4">
+                      <label className="text-[10px] font-black uppercase tracking-[0.4em] text-neutral-600">Active Shot Definition</label>
+                      <div className="bg-black/40 p-6 rounded-[2rem] border border-white/5 flex flex-col gap-6">
+                        <div className="flex items-center justify-between">
+                          <div><div className="text-4xl font-black text-white">{activeSegmentIdx + 1} <span className="text-xl text-neutral-800">/ {transcript.framing_segments.length}</span></div></div>
+                          <button onClick={() => deleteSegment(activeSegmentIdx)} className="p-4 bg-red-600/5 hover:bg-red-600 border border-red-500/10 rounded-2xl text-red-500 hover:text-white transition-all"><Trash2 className="w-6 h-6" /></button>
+                        </div>
 
-        {/* Pro Inspector */}
-        <div className="w-[450px] bg-[#0c0c0c] flex flex-col border-l border-white/5 shadow-2xl overflow-hidden relative z-20">
-          {showTranscriptEditor ? (
-            <div className="flex-1 flex flex-col bg-black/40">
-              <div className="p-10 border-b border-white/5 bg-black/20">
-                <h2 className="text-2xl font-black uppercase tracking-tighter italic text-indigo-400 mb-2">Word Lab</h2>
-                <p className="text-[10px] text-neutral-600 font-bold uppercase tracking-widest">Edit phrases or delete hallucinations</p>
-              </div>
-              <div className="flex-1 overflow-y-auto p-8 space-y-3 custom-scrollbar">
-                {transcript?.words?.map((w: any, idx: number) => (
-                  <div key={idx} className={`group flex items-center gap-4 p-4 rounded-2xl border transition-all ${currentTime >= w.start && currentTime <= w.end ? 'bg-indigo-600/20 border-indigo-500 shadow-xl scale-[1.02]' : 'bg-black/40 border-white/5 opacity-40 hover:opacity-100'}`}>
-                    <div className="w-10 text-[9px] font-mono text-neutral-600">{w.start.toFixed(1)}s</div>
-                    <input className="flex-1 bg-transparent border-none text-xs font-black text-white focus:outline-none" value={w.word}
-                      onChange={(e) => { const nw = [...transcript.words]; nw[idx].word = e.target.value; setTranscript({ ...transcript, words: nw }); }}
-                      onBlur={() => saveToBackend(transcript)} />
-                    <button onClick={() => deleteWord(idx)} className="opacity-0 group-hover:opacity-100 p-2 hover:bg-red-500/20 rounded-lg text-red-500 transition-all"><Eraser className="w-4 h-4" /></button>
-                  </div>
-                ))}
-              </div>
-              <div className="p-8 bg-indigo-900/10 border-t border-indigo-500/20 text-center"><button onClick={() => setShowTranscriptEditor(false)} className="text-[10px] font-black uppercase text-indigo-400 tracking-widest hover:text-white">Close Editor</button></div>
-            </div>
-          ) : (
-            <div className="flex-1 flex flex-col p-12 overflow-y-auto">
-              <div className="flex items-center justify-between mb-12">
-                <h2 className="text-3xl font-black uppercase tracking-tighter italic">Clip Config</h2>
-                <Settings className="w-6 h-6 text-neutral-700" />
-              </div>
-
-              {transcript ? (
-                <div className="space-y-16">
-                  {/* Active Shot Box */}
-                  <div className="space-y-4">
-                    <label className="text-[10px] font-black uppercase tracking-[0.4em] text-neutral-600">Active Shot Definition</label>
-                    <div className="bg-black/40 p-6 rounded-[2rem] border border-white/5 flex flex-col gap-6">
-                      <div className="flex items-center justify-between">
-                        <div><div className="text-4xl font-black text-white">{activeSegmentIdx + 1} <span className="text-xl text-neutral-800">/ {transcript.framing_segments.length}</span></div></div>
-                        <button onClick={() => deleteSegment(activeSegmentIdx)} className="p-4 bg-red-600/5 hover:bg-red-600 border border-red-500/10 rounded-2xl text-red-500 hover:text-white transition-all"><Trash2 className="w-6 h-6" /></button>
-                      </div>
-
-                      <div className="pt-6 border-t border-white/5">
-                        <div className="flex items-center justify-between mb-4"><span className="text-[10px] font-bold uppercase text-purple-400 tracking-widest">Horizontal Center</span><span className="text-xl font-mono font-black text-white">{(transcript.framing_segments[activeSegmentIdx].center * 100).toFixed(0)}%</span></div>
-                        <input type="range" min="0" max="1" step="0.005" value={transcript.framing_segments[activeSegmentIdx].center} onChange={(e) => updateSegmentCenter(activeSegmentIdx, parseFloat(e.target.value))}
-                          className="w-full h-3 bg-black border border-white/10 rounded-full appearance-none accent-purple-500 cursor-pointer shadow-lg hover:ring-8 ring-purple-600/10 transition-all" />
+                        <div className="pt-6 border-t border-white/5">
+                          <div className="flex items-center justify-between mb-4">
+                            <span className="text-[10px] font-bold uppercase text-purple-400 tracking-widest">Horizontal Center</span>
+                            <span className="text-xl font-mono font-black text-white">
+                              {((transcript.framing_segments?.[activeSegmentIdx]?.center || 0.5) * 100).toFixed(0)}%
+                            </span>
+                          </div>
+                          <input type="range" min="0" max="1" step="0.005" value={transcript.framing_segments?.[activeSegmentIdx]?.center || 0.5} onChange={(e) => updateSegmentCenter(activeSegmentIdx, parseFloat(e.target.value))}
+                            className="w-full h-3 bg-black border border-white/10 rounded-full appearance-none accent-purple-500 cursor-pointer shadow-lg hover:ring-8 ring-purple-600/10 transition-all" />
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              ) : (
-                <div className="flex-1 flex items-center justify-center opacity-20"><Cpu className="w-16 h-16" /></div>
-              )}
+                ) : (
+                  <div className="flex-1 flex items-center justify-center opacity-20"><Cpu className="w-16 h-16" /></div>
+                )}
 
-              <div className="mt-auto pt-16 space-y-8">
-                {status.status === 'failed' ? (
-                  <div className="p-6 bg-red-500/10 border border-red-500/20 rounded-[2.5rem] flex flex-col items-center justify-center text-center">
-                    <div className="text-[9px] font-black uppercase text-red-500 mb-2 tracking-[0.2em]">Pipeline Failed</div>
-                    <div className="text-xs font-bold text-red-400 break-words">{status.error || 'Unknown Error'}</div>
-                  </div>
-                ) : status.status !== 'idle' ? (
-                  <>
-                    <div className="p-6 bg-white/5 border border-white/5 rounded-[2.5rem] flex items-center justify-between">
-                      <div><div className="text-[9px] font-black uppercase text-neutral-600 mb-1">Engine Load</div><div className="text-xl font-black text-white/80">{status.progress}%</div></div>
-                      <div className="w-32 h-1.5 bg-black rounded-full overflow-hidden"><div className="h-full bg-purple-600 transition-all duration-700" style={{ width: `${status.progress}%` }} /></div>
+                <div className="mt-auto pt-16 space-y-8">
+                  {status.status === 'failed' ? (
+                    <div className="p-6 bg-red-500/10 border border-red-500/20 rounded-[2.5rem] flex flex-col items-center justify-center text-center">
+                      <div className="text-[9px] font-black uppercase text-red-500 mb-2 tracking-[0.2em]">Pipeline Failed</div>
+                      <div className="text-xs font-bold text-red-400 break-words">{status.error || 'Unknown Error'}</div>
                     </div>
-                    <p className="text-[10px] text-neutral-500 font-bold leading-relaxed px-4 break-words">{status.message}</p>
-                  </>
-                ) : null}
+                  ) : status.status !== 'idle' ? (
+                    <>
+                      <div className="p-6 bg-white/5 border border-white/5 rounded-[2.5rem] flex items-center justify-between">
+                        <div><div className="text-[9px] font-black uppercase text-neutral-600 mb-1">Engine Load</div><div className="text-xl font-black text-white/80">{status.progress}%</div></div>
+                        <div className="w-32 h-1.5 bg-black rounded-full overflow-hidden"><div className="h-full bg-purple-600 transition-all duration-700" style={{ width: `${status.progress}%` }} /></div>
+                      </div>
+                      <p className="text-[10px] text-neutral-500 font-bold leading-relaxed px-4 break-words">{status.message}</p>
+                    </>
+                  ) : null}
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
-      </div>
-      <style jsx global>{`
+        <style jsx global>{`
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
         input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 36px; width: 16px; border-radius: 6px; background: #A855F7; border: 3px solid #fff; cursor: pointer; box-shadow: 0 0 20px rgba(168,85,247,0.5); }
       `}</style>
-    </main>
+      </main>
+    </GlobalErrorBoundary>
   );
 }

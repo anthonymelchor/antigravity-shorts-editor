@@ -103,8 +103,14 @@ export const Main: React.FC<MainProps> = ({ transcript: propTranscript, videoSrc
     // Vertical offset - keep it at 0 to respect the original camera framing
     const verticalOffset = 0;
 
-    const videoSrc = videoSrcOverride || (transcript.video_url ? staticFile(transcript.video_url) : staticFile('output_vertical_clip.mp4'));
-    const audioSrc = transcript.audio_url ? staticFile(transcript.audio_url) : staticFile('output_vertical_clip.wav');
+    const videoUrl = transcript.video_url?.startsWith('http')
+        ? transcript.video_url
+        : (transcript.video_url ? staticFile(transcript.video_url) : staticFile('output_vertical_clip.mp4'));
+    const videoSrc = videoSrcOverride || videoUrl;
+
+    const audioSrc = transcript.audio_url?.startsWith('http')
+        ? transcript.audio_url
+        : (transcript.audio_url ? staticFile(transcript.audio_url) : staticFile('output_vertical_clip.wav'));
 
     const VideoLayer: React.FC<{ c: number, yOffset: number }> = ({ c, yOffset }) => {
         const leftValue = calculateVideoTranslation(c);

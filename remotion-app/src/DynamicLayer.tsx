@@ -61,14 +61,14 @@ export const DynamicLayer: React.FC<{ events: EditEvents }> = ({ events }) => {
                     return (
                         <div key={`icon-${i}`} style={{
                             position: 'absolute',
-                            top: layout === 'top' ? '20%' : '50%',
+                            top: layout === 'top' ? '20%' : '70%',
                             left: '50%',
                             transform: 'translate(-50%, -50%)',
                             zIndex: 25,
                         }}>
                             <PopAnimation delay={0}>
                                 <FloatingAnimation>
-                                    <span style={{ fontSize: '180px', textShadow: '0 20px 50px rgba(0,0,0,0.6)' }}>
+                                    <span style={{ fontSize: '120px', textShadow: '0 20px 50px rgba(0,0,0,0.6)' }}>
                                         {getIconEmoji(icon.keyword)}
                                     </span>
                                 </FloatingAnimation>
@@ -104,7 +104,7 @@ const IconGrid: React.FC<{ emoji: string; layout: string; localFrame: number; fp
                     transform: 'translate(-50%, -50%)',
                 }}>
                     <PopAnimation delay={it.delay}>
-                        <span style={{ fontSize: `${80 * it.scale}px`, opacity: 0.6 }}>{emoji}</span>
+                        <span style={{ fontSize: `${60 * it.scale}px`, opacity: 0.6 }}>{emoji}</span>
                     </PopAnimation>
                 </div>
             ))}
@@ -114,13 +114,38 @@ const IconGrid: React.FC<{ emoji: string; layout: string; localFrame: number; fp
 
 const getIconEmoji = (keyword: string) => {
     const map: Record<string, string> = {
+        // Core Actions/Concepts
         'money': '💰', 'cash': '💵', 'rich': '🤑',
-        'idea': '💡', 'think': '🧠',
-        'warning': '⚠️', 'stop': '🚫',
-        'time': '⏳', 'fast': '⚡',
-        'heart': '❤️', 'love': '🔥',
-        'rocket': '🚀', 'growth': '📈',
-        'work': '💼', 'success': '🏆'
+        'idea': '💡', 'think': '🧠', 'mind': '🧠',
+        'warning': '⚠️', 'alert': '🚨', 'danger': '☢️',
+        'stop': '🚫', 'no': '❌', 'error': '✖️', 'wrong': '⛔',
+        'check': '✅', 'yes': '✔️', 'correct': '👍', 'ok': '👌',
+        'time': '⏳', 'clock': '⏰', 'fast': '⚡', 'speed': '🚀',
+        'heart': '❤️', 'love': '🔥', 'hot': '🔥',
+        'rocket': '🚀', 'growth': '📈', 'up': '⬆️', 'down': '⬇️',
+        'work': '💼', 'task': '📋', 'office': '🏢',
+        'success': '🏆', 'win': '🥇', 'star': '⭐',
+
+        // Emotion & Reaction
+        'laugh': '😂', 'funny': '🤣', 'lol': '😆',
+        'wow': '🤯', 'shock': '😱', 'amazing': '✨',
+        'cool': '😎', 'look': '👀', 'eye': '👁️',
+        'sad': '😢', 'bad': '👎', 'cry': '😭',
+
+        // Tools & Tech
+        'phone': '📱', 'computer': '💻', 'tech': '⚙️',
+        'camera': '📷', 'video': '🎥', 'mic': '🎙️',
+        'search': '🔍', 'find': '🔎',
+        'link': '🔗', 'lock': '🔒', 'shield': '🛡️',
+        'tool': '🛠️', 'fix': '🔧', 'build': '🔨',
+
+        // Life & World
+        'book': '📖', 'learn': '📚', 'write': '✍️',
+        'news': '📰', 'mail': '📧', 'chat': '💬',
+        'home': '🏠', 'world': '🌎', 'travel': '✈️',
+        'sun': '☀️', 'moon': '🌙', 'star_special': '🌟',
+        'music': '🎵', 'sound': '🔊',
+        'gift': '🎁', 'party': '🎉', 'health': '💪'
     };
     return map[keyword.toLowerCase()] || '✨';
 };

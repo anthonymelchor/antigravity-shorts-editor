@@ -21,6 +21,8 @@ export interface Transcript {
     framing_segments?: FramingSegment[];
     text: string;
     words: any[];
+    video_url?: string;
+    audio_url?: string;
     edit_events?: {
         zooms: any[];
         icons: any[];
@@ -100,8 +102,14 @@ export const Main: React.FC<MainProps> = ({ transcript: propTranscript, videoSrc
     // Vertical offset - keep it at 0 to respect the original camera framing
     const verticalOffset = 0;
 
-    const videoSrc = videoSrcOverride || staticFile('output_vertical_clip.mp4');
-    const audioSrc = staticFile('output_vertical_clip.wav');
+    const videoUrl = transcript.video_url?.startsWith('http')
+        ? transcript.video_url
+        : (transcript.video_url ? staticFile(transcript.video_url) : staticFile('output_vertical_clip.mp4'));
+    const videoSrc = videoSrcOverride || videoUrl;
+
+    const audioSrc = transcript.audio_url?.startsWith('http')
+        ? transcript.audio_url
+        : (transcript.audio_url ? staticFile(transcript.audio_url) : staticFile('output_vertical_clip.wav'));
 
     const renderVideoLayer = (c: number, yOffset: number) => {
         const leftValue = calculateVideoTranslation(c);

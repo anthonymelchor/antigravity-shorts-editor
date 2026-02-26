@@ -25,17 +25,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Ensure FFmpeg is available in PATH for the entire script (including yt-dlp)
-ffmpeg_bin = r"C:\Users\MELCHOR\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin"
-if ffmpeg_bin not in os.environ.get("PATH", ""):
-    os.environ["PATH"] = ffmpeg_bin + os.pathsep + os.environ.get("PATH", "")
+# Ensure FFmpeg is available in PATH
+if os.name == "nt":
+    ffmpeg_bin = r"C:\Users\MELCHOR\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin"
+    if ffmpeg_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = ffmpeg_bin + os.pathsep + os.environ.get("PATH", "")
 
-def download_video(url, output_path="temp_video.mp4"):
+def download_video(url, output_path):
     print(f"Downloading video from {url}...")
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'outtmpl': output_path,
-        # 'quiet': True
+        'overwrites': True,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
@@ -111,25 +112,34 @@ def analyze_with_gemini(transcript):
     CLEAN PROFESSIONAL EDITING STRATEGY (CRITICAL):
     1. DYNAMIC CUTS (Punch Zooms): Use "in" (fast scale jump) sparingly on important punchlines, and "out" to reset. Use a maximum of 2-5 zooms in the ENTIRE clip. Let the content breathe.
     2. DEPTH & MOVEMENT: Use "ken-burns" during storytelling segments for an extremely subtle, slow drift. NEVER USE "shake" or fast continuous movements.
-    3. ICONS: Use them to reinforce keywords. Use a tasteful amount (e.g., 4-7 icons in the clip). Try "center" or "top" layouts. Ensure they pop cleanly.
-    4. B-ROLL: Prioritize finding high-quality short b-roll clips from Pexels for context. Never use "shake".
+    3. PRECISION ICONS (EMOJIS): Use them to reinforce specific concepts or emotions. 
+       - EMOJI ALIGNMENT (MANDATORY): Choose icons that are STRICTLY aligned with what is being said.
+       - SPANISH SUPPORT: If the transcript is in Spanish, map the Spanish concepts to the most appropriate English keywords from the list below.
+       - VARIETY & DIVERSITY: Do not repeat the same icon unless necessary. Use the most appropriate one from the available list.
+       - DENSITY: 4-7 icons total.
+       - AVAILABLE KEYWORDS (Grouped by category):
+         * Core: 'money', 'cash', 'rich', 'idea', 'think', 'mind', 'warning', 'alert', 'danger', 'stop', 'no', 'error', 'wrong', 'check', 'yes', 'correct', 'ok', 'time', 'clock', 'fast', 'speed', 'heart', 'love', 'hot', 'rocket', 'growth', 'up', 'down', 'work', 'task', 'office', 'success', 'win', 'star'
+         * Emotions/Reactions: 'laugh', 'funny', 'lol', 'wow', 'shock', 'amazing', 'cool', 'look', 'eye', 'sad', 'bad', 'cry'
+         * Tech/Tools: 'phone', 'computer', 'tech', 'camera', 'video', 'mic', 'search', 'find', 'link', 'lock', 'shield', 'tool', 'fix', 'build'
+         * Life/World: 'book', 'learn', 'write', 'news', 'mail', 'chat', 'home', 'world', 'travel', 'sun', 'moon', 'star_special', 'music', 'sound', 'gift', 'party', 'health'
+    4. B-ROLL: Prioritize finding high-quality short b-roll clips from Pexels for context.
 
     Output the result as raw JSON:
 
     {{
         "start": <float>,
         "end": <float>,
-        "reasoning": "<why this will go viral>",
-        "clip_text": "<text summary>",
+        "reasoning": "<why this will go viral - in English or Spanish>",
+        "clip_text": "<text summary in the same language as transcript>",
         "edit_events": {{
             "zooms": [
                 {{ "time": <float>, "type": "in" | "out" | "ken-burns", "intensity": 0.5 }}
             ],
             "icons": [
-                {{ "time": <float>, "keyword": "money" | "idea" | "warning" | "time" | "heart" | "rocket" | "work" | "success", "layout": "center" | "top" | "grid" | "scattered", "duration": 1.5 }}
+                {{ "time": <float>, "keyword": "money" | "idea" | "warning" | "time" | "heart" | "rocket" | "work" | "success" | etc..., "layout": "center" | "top" | "grid" | "scattered", "duration": 1.5 }}
             ],
             "b_rolls": [
-                {{ "time": <float>, "query": "<search_query>", "duration": 3.0 }}
+                {{ "time": <float>, "query": "<search_query in English for Pexels>", "duration": 3.0 }}
             ]
         }}
     }}
@@ -455,7 +465,7 @@ def analyze_framing_with_gemini_old(video_path, start_time, end_time):
             os.remove(proxy_path)
         return {"layout": "single", "center": 0.5, "center_top": 0.5, "center_bottom": 0.5, "reasoning": "AI Framing failed (Quota/429), using default centering."}
 
-def process_video_ffmpeg(input_path, output_path, start_time, end_time):
+def process_video_ffmpeg(input_path, output_path, start_time, end_time, audio_path=None):
     logger.info(f"Extracting LOSSLESS clip: {start_time}s to {end_time}s...")
     duration = float(end_time) - float(start_time)
     
@@ -477,7 +487,7 @@ def process_video_ffmpeg(input_path, output_path, start_time, end_time):
     logger.info(f"Lossless clip saved to {output_path}")
 
     # Extract precise WAV audio to guarantee 0 audio stutters in Chromium/Remotion
-    audio_output = output_path.replace(".mp4", ".wav")
+    audio_output = audio_path if audio_path else output_path.replace(".mp4", ".wav")
     logger.info(f"Extracting pristine Audio WAV track to {audio_output}...")
     audio_cmd = [
         "ffmpeg",
@@ -494,32 +504,35 @@ def process_video_ffmpeg(input_path, output_path, start_time, end_time):
 
 if __name__ == "__main__":
     import sys
-    # Use URL from argument if provided, otherwise use default
+    # 0. Get arguments
     youtube_url = sys.argv[1] if len(sys.argv) > 1 else None
+    version = sys.argv[2] if len(sys.argv) > 2 else str(int(time.time()))
     
-    try:
-        # 0. Clean up previous runs to ensure we don't reuse old video metadata
-        if os.path.exists("transcript_data.json"):
-            os.remove("transcript_data.json")
+    # Define working filenames for this run
+    INPUT_FILE = f"input_{version}.mp4"
+    VIDEO_OUT = f"video_{version}.mp4"
+    AUDIO_OUT = f"audio_{version}.wav"
+    TRANSCRIPT_FILE = f"transcript_{version}.json"
 
-        # 1. Download (Skip if already exists and no URL provided)
-        if not os.path.exists("input_full.mp4") or youtube_url:
-            if not youtube_url:
-                youtube_url = "https://www.youtube.com/watch?v=okL1xL_hHOw"
-            video_file = download_video(youtube_url, "input_full.mp4")
-        else:
+    try:
+        # 1. Download (Always download if URL provided)
+        if youtube_url:
+            video_file = download_video(youtube_url, INPUT_FILE)
+        elif os.path.exists("input_full.mp4"):
             video_file = "input_full.mp4"
-            print("Using existing input_full.mp4")
+            print("Using legacy input_full.mp4")
+        else:
+            # Fallback default
+            youtube_url = "https://www.youtube.com/watch?v=okL1xL_hHOw"
+            video_file = download_video(youtube_url, INPUT_FILE)
         
         # 2. Transcribe
         transcript = transcribe_audio(video_file)
             
         # 3. Analyze
-        # Make sure GEMINI_API_KEY is an environment variable!
         analysis = analyze_with_gemini(transcript)
         
         # 3.5 Adjust Transcript Timestamps
-        # The cut video starts at 0s, so we must subtract analysis['start'] from all words
         start_time = float(analysis['start'])
         end_time = float(analysis['end'])
         
@@ -550,15 +563,6 @@ if __name__ == "__main__":
                     if 'time' in event:
                         event['time'] = max(0.0, float(event['time']) - start_time)
 
-        # for broll in edit_events.get("b_rolls", []):
-        #     query = broll.get("query")
-        #     if query:
-        #         print(f">>> Searching B-roll for: {query}...")
-        #         url = search_pexels_videos(query)
-        #         if url:
-        #             broll["url"] = url
-        #             print(f"  [Pexels] Found: {url}")
-
         # 3.9 Prepare final transcript data for Remotion
         final_data = {
             "text": analysis.get("clip_text", ""),
@@ -570,23 +574,27 @@ if __name__ == "__main__":
             "center_bottom": framing_data.get("center_bottom", 0.5),
             "framing_reasoning": framing_data.get("reasoning", ""),
             "framing_segments": framing_data.get("framing_segments", []),
-            "edit_events": edit_events
+            "edit_events": edit_events,
+            "video_url": VIDEO_OUT,
+            "audio_url": AUDIO_OUT,
+            "version": version
         }
         
+        with open(TRANSCRIPT_FILE, "w", encoding="utf-8") as f:
+            json.dump(final_data, f, ensure_ascii=False, indent=2)
+            
+        # Also maintain a "latest" copy for simple access if needed
         with open("transcript_data.json", "w", encoding="utf-8") as f:
             json.dump(final_data, f, ensure_ascii=False, indent=2)
 
         # 4. Crop and Cut
-        # We produce a wide clip (raw clip) and let Remotion handle the cropping.
-        output_path = "output_vertical_clip.mp4"
-        process_video_ffmpeg("input_full.mp4", output_path, start_time, end_time)
+        process_video_ffmpeg(video_file, VIDEO_OUT, start_time, end_time, AUDIO_OUT)
         
-        logger.info("Backend processing pipeline complete! Success.")
+        logger.info(f"Backend processing pipeline complete! Version: {version}")
         # Force flush log
         for l in logger.handlers:
             l.flush()
 
-        
     except Exception as e:
         logger.exception("CRITICAL ERROR: Pipeline failed dramatically.")
         print(f"Pipeline failed: {str(e)}")
