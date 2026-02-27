@@ -74,7 +74,7 @@ def analyze_failure(original_video, rendered_video, start_time):
         """
         
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-2.5-flash',
             contents=uploaded + [prompt],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",

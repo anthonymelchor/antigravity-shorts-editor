@@ -9,6 +9,7 @@ import {
   RotateCcw,
   Settings,
   ShieldAlert,
+
   Link as LinkIcon,
   Cloud,
   ChevronRight,
@@ -27,46 +28,7 @@ import {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
-// --- ERROR LOGGING HELPER ---
-const logErrorToBackend = async (error: any, context?: string) => {
-  try {
-    await fetch(`${API_BASE}/api/log-error`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: error.message || String(error),
-        stack: error.stack,
-        context: context || 'General UI Error',
-        url: window.location.href,
-        userAgent: navigator.userAgent
-      })
-    });
-  } catch (err) {
-    console.error("Critical: Failed to report error to backend", err);
-  }
-};
 
-// --- ERROR BOUNDARY COMPONENT ---
-class GlobalErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
-  constructor(props: { children: React.ReactNode }) {
-    super(props);
-    this.state = { hasError: false };
-  }
-  static getDerivedStateFromError() { return { hasError: true }; }
-  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) { logErrorToBackend(error, errorInfo.componentStack ?? undefined); }
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div className="min-h-screen bg-black flex flex-col items-center justify-center p-8 text-center">
-          <ShieldAlert className="w-16 h-16 text-red-500 mb-6" />
-          <h1 className="text-2xl font-bold mb-4 text-white uppercase tracking-tighter">System Error</h1>
-          <button onClick={() => window.location.reload()} className="px-8 py-3 bg-white text-black font-bold uppercase rounded-xl">Restart</button>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
 
 export default function Home() {
   const [url, setUrl] = useState('');
@@ -80,7 +42,54 @@ export default function Home() {
   const [transcript, setTranscript] = useState<any>(null);
   const [selectedClipIdx, setSelectedClipIdx] = useState(0);
   const [selectedForRender, setSelectedForRender] = useState<number[]>([]);
+  const [preferredLanguage, setPreferredLanguage] = useState<'en' | 'es'>('es');
+  const [projects, setProjects] = useState<any[]>([]);
+  const [showDeleteModal, setShowDeleteModal] = useState<string | null>(null);
+  const [alert, setAlert] = useState<{ msg: string; type: 'error' | 'warning' } | null>(null);
+  const [activeUrl, setActiveUrl] = useState<string | null>(null);
+  const [currentVersion, setCurrentVersion] = useState<string | null>(null);
+  const [isLaunching, setIsLaunching] = useState(false);
+  const processingRef = useRef<string | null>(null);
+  const versionRef = useRef<string | null>(null);
   const playerRef = useRef<PlayerRef>(null);
+  const pendingDeletions = useRef<Set<string>>(new Set());
+
+
+  useEffect(() => {
+    fetchProjects();
+  }, []);
+
+  const fetchProjects = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/projects`);
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        // Find failed projects to show error and auto-cleanup
+        const failedProj = data.find(p => p.status === 'failed');
+        if (failedProj && !pendingDeletions.current.has(failedProj.version)) {
+          setAlert({ msg: "Hubo un inconveniente, intenta de nuevo en unos minutos.", type: 'error' });
+          // Auto-cleanup failed projects so they don't clutter the UI
+          pendingDeletions.current.add(failedProj.version);
+          fetch(`${API_BASE}/api/project/${failedProj.version}`, { method: 'DELETE' });
+        }
+
+        // If we were launching and now we see the project in the list, stop launching state
+        if (versionRef.current && data.find(p => String(p.version) === String(versionRef.current))) {
+          setIsLaunching(false);
+          versionRef.current = null;
+        }
+
+        setProjects(data.filter(p => p.status !== 'failed'));
+      }
+    } catch (err) {
+      console.error("Failed to fetch projects", err);
+      setProjects([]);
+    }
+  };
+
+
+
+
 
   useEffect(() => {
     checkInitialStatus();
@@ -99,6 +108,13 @@ export default function Home() {
   };
 
   useEffect(() => {
+    if (alert && alert.type === 'warning') {
+      const timer = setTimeout(() => setAlert(null), 6000);
+      return () => clearTimeout(timer);
+    }
+  }, [alert]);
+
+  useEffect(() => {
     let interval: NodeJS.Timeout;
     if (status.status !== 'idle' && status.status !== 'completed' && status.status !== 'failed') {
       interval = setInterval(async () => {
@@ -106,29 +122,74 @@ export default function Home() {
           const res = await fetch(`${API_BASE}/api/status`);
           const data = await res.json();
           setStatus(data);
-          if (data.status === 'completed') {
+
+          if ((data.status === 'completed' || data.status === 'failed') && String(data.version) === String(versionRef.current)) {
+            processingRef.current = null;
+            versionRef.current = null;
+            setCurrentVersion(null);
             checkInitialStatus();
+            fetchProjects();
           }
         } catch (err) { console.error("Poll failed", err); }
-      }, 1000);
+      }, 2000);
     }
     return () => clearInterval(interval);
   }, [status.status]);
 
+  // Dashboard Auto-Refresh: Keeps project list and progress cards updated
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (view === 'dashboard') {
+      fetchProjects(); // Initial fetch
+      interval = setInterval(fetchProjects, isLaunching ? 1000 : 3000);
+    }
+    return () => clearInterval(interval);
+  }, [view, isLaunching]);
+
   const handleProcess = async () => {
     if (!url.trim()) return;
+
+    // Global Duplicate Check: Check if any project in secondary list is already processing this URL
+    const alreadyProcessing = projects.find(p => p.isActive && p.url === url.trim());
+    if (alreadyProcessing) {
+      setAlert({ msg: `Este video ya está siendo procesado: "${alreadyProcessing.title || 'Proyecto'}"`, type: 'warning' });
+      setView('dashboard');
+      return;
+    }
+
     try {
-      setTranscript(null);
-      await fetch(`${API_BASE}/api/process`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url })
-      });
+      setAlert(null); // Clear previous alerts
+      setIsLaunching(true);
+      setActiveUrl(url.trim());
+      processingRef.current = url.trim(); // LOCK INSTANTLY
+
+      // Clear previous error state immediately
       setStatus({ status: 'processing', progress: 0, message: 'Waking up engine...', error: null });
+      setTranscript(null);
+
+      const res = await fetch(`${API_BASE}/api/process`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: url.trim() })
+      });
+      const data = await res.json();
+
+      if (data.version) {
+        setCurrentVersion(String(data.version));
+        versionRef.current = String(data.version);
+        await fetchProjects(); // Initial check
+      }
+
       setView('dashboard');
     } catch (err: any) {
-      logErrorToBackend(err, 'handleProcess');
-      setStatus({ ...status, status: 'failed', error: 'Internal Engine Communication Error' });
+      console.error(err);
+      processingRef.current = null; // UNLOCK ON ERROR
+      versionRef.current = null;
+      setCurrentVersion(null);
+      setStatus({ status: 'failed', progress: 0, message: 'Network Error', error: err.message });
+      setAlert({ msg: "Hubo un inconveniente, intenta de nuevo en unos minutos.", type: 'error' });
+      setIsLaunching(false); // Stop on hard error
     }
+
   };
 
   const handleReset = async () => {
@@ -138,8 +199,37 @@ export default function Home() {
       setTranscript(null); setUrl('');
       setStatus({ status: 'idle', progress: 0, message: 'Project Cleared', error: null });
       setView('dashboard');
-    } catch (err: any) { logErrorToBackend(err, 'handleReset'); }
+      fetchProjects();
+    } catch (err: any) { console.error(err); }
+
   };
+
+  const handleDeleteProject = async (version: string) => {
+    try {
+      await fetch(`${API_BASE}/api/project/${version}`, { method: 'DELETE' });
+      setShowDeleteModal(null);
+      fetchProjects();
+      // If we are viewing this specific project, reset view
+      if (transcript?.version === version) {
+        setTranscript(null);
+        setStatus({ status: 'idle', progress: 0, message: 'Ready', error: null });
+      }
+    } catch (err: any) { console.error(err); }
+
+  };
+
+  const loadProject = async (version: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/transcript/${version}`);
+      const data = await res.json();
+      if (data && !data.error) {
+        setTranscript(data);
+        setStatus({ status: 'completed', progress: 100, message: 'Loaded', error: null });
+        setView('results');
+      }
+    } catch (err) { console.error("Failed to load project", err); }
+  };
+
 
   const removeEmoji = (idxToRemove: number) => {
     if (!transcript) return;
@@ -154,17 +244,72 @@ export default function Home() {
     setTranscript(newTranscript);
   };
 
+  const handleRender = async (clipIdx?: number) => {
+    if (!transcript?.version) {
+      setAlert({ msg: "No version found to render", type: 'error' });
+      return;
+    }
+
+    // Preparation: if clipIdx is passed, use that. Else use selectedForRender.
+    const indicesToRender = clipIdx !== undefined ? [clipIdx] : selectedForRender;
+
+    if (indicesToRender.length === 0) {
+      setAlert({ msg: "No clips selected for rendering", type: 'error' });
+      return;
+    }
+
+    try {
+      setAlert({ msg: `Rendering ${indicesToRender.length} clip(s)...`, type: 'warning' });
+      const res = await fetch(`${API_BASE}/api/render`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          version: transcript.version,
+          indices: indicesToRender
+        })
+      });
+      const data = await res.json();
+
+      if (data.message && data.message.includes("started")) {
+        setAlert({ msg: "¡Excelente! Hemos iniciado la fila de renderizado. Los clips aparecerán en tu panel principal en unos minutos.", type: 'warning' });
+        setView('dashboard');
+        fetchProjects();
+      } else {
+        setAlert({ msg: "Hubo un pequeño contratiempo al iniciar el render. Por favor, intenta de nuevo en un momento.", type: 'error' });
+      }
+    } catch (err) {
+      console.error("Render trigger failed", err);
+      setAlert({ msg: "No pudimos conectar con el servidor de video. Revisa tu conexión e intenta otra vez.", type: 'error' });
+    }
+  };
+
   const resultsLayout = (
     <div className="flex-1 flex flex-col bg-black">
       {/* Navbar Results */}
       <nav className="border-b border-white/5 px-12 h-20 flex items-center justify-between bg-black/50 backdrop-blur-xl">
         <div className="flex items-center gap-4">
-          <button onClick={() => setView('dashboard')} className="p-2 hover:bg-white/5 rounded-full transition-all">
+          <button onClick={() => setView('dashboard')} className="p-2 hover:bg-white/5 rounded-full transition-all cursor-pointer">
             <ChevronRight className="w-5 h-5 rotate-180" />
           </button>
           <h1 className="text-xl font-bold tracking-tighter uppercase">RocotoClip</h1>
         </div>
         <div className="flex items-center gap-6">
+          <div className="flex bg-white/5 rounded-xl p-1 gap-1 border border-white/5">
+            <button
+              onClick={() => setPreferredLanguage('en')}
+              className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all cursor-pointer ${preferredLanguage === 'en' ? 'bg-white text-black' : 'text-neutral-500 hover:text-white'}`}
+            >
+              EN
+            </button>
+            <button
+              onClick={() => setPreferredLanguage('es')}
+              className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all cursor-pointer ${preferredLanguage === 'es' ? 'bg-white text-black' : 'text-neutral-500 hover:text-white'}`}
+            >
+              ES
+            </button>
+          </div>
           <div className="flex flex-col items-end">
             <span className="text-[10px] font-black text-neutral-500 uppercase">Analysis Complete</span>
             <span className="text-xs font-bold text-white">5 Clips Identified</span>
@@ -172,29 +317,15 @@ export default function Home() {
         </div>
       </nav>
 
-      {/* ERROR OVERLAY IF FAILED WHILE VIEWING */}
-      {status.status === 'failed' && (
-        <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-12">
-          <div className="max-w-md w-full bg-neutral-900 border border-red-500/20 p-10 rounded-[3rem] text-center shadow-2xl">
-            <ShieldAlert className="w-12 h-12 text-red-500 mx-auto mb-6" />
-            <h2 className="text-xl font-black uppercase text-white mb-4">Lo sentimos</h2>
-            <p className="text-neutral-400 text-sm mb-8">Hubo un fallo en el proceso, estamos trabajando para solucionarlo.</p>
-            <button
-              onClick={() => setView('dashboard')}
-              className="w-full bg-white text-black font-black py-4 rounded-2xl uppercase text-[10px] tracking-widest hover:bg-neutral-200 transition-all"
-            >
-              Volver al Panel
-            </button>
-          </div>
-        </div>
-      )}
+
 
       {/* Top Menu for Results */}
       <div className="border-b border-white/5 py-4 px-12 flex justify-between items-center bg-[#050505] sticky top-0 z-50">
         <span className="text-xs font-bold text-neutral-500 uppercase tracking-widest">Select the clips you want to export</span>
         <button
+          onClick={() => handleRender()}
           disabled={selectedForRender.length === 0}
-          className="px-6 py-2 bg-purple-600 hover:bg-purple-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl disabled:opacity-30 transition-all shadow-[0_0_20px_rgba(147,51,234,0.3)]">
+          className="px-6 py-2 bg-purple-600 hover:bg-purple-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl disabled:opacity-30 transition-all shadow-[0_0_20px_rgba(147,51,234,0.3)] cursor-pointer">
           Render Selected ({selectedForRender.length})
         </button>
       </div>
@@ -202,7 +333,7 @@ export default function Home() {
       {/* Main Content Area - Cascade View */}
       <div className="flex-1 overflow-y-auto p-12 bg-black custom-scrollbar">
         <div className="max-w-6xl mx-auto flex flex-col gap-12 pb-24">
-          {transcript?.clips?.slice(0, 1).map((clip: any, idx: number) => {
+          {transcript?.clips?.map((clip: any, idx: number) => {
             const isSelected = selectedForRender.includes(idx);
             const toggleSelect = () => setSelectedForRender(prev =>
               prev.includes(idx) ? prev.filter(i => i !== idx) : [...prev, idx]
@@ -246,7 +377,7 @@ export default function Home() {
                       </label>
                       <h3 className="text-sm font-bold truncate max-w-[500px] text-white/90">{clip.title || `Segment #${idx + 1}`}</h3>
                     </div>
-                    <button onClick={() => { setSelectedClipIdx(idx); setView('editor'); }} className="w-10 h-10 flex items-center justify-center bg-white text-black hover:bg-neutral-200 rounded-xl transition-transform hover:scale-105 shadow-xl">
+                    <button onClick={() => { setSelectedClipIdx(idx); setView('editor'); }} className="w-10 h-10 flex items-center justify-center bg-white text-black hover:bg-neutral-200 rounded-xl transition-transform hover:scale-105 shadow-xl cursor-pointer">
                       <Edit2 className="w-4 h-4" />
                     </button>
                   </div>
@@ -262,7 +393,11 @@ export default function Home() {
                           durationInFrames={Math.ceil((clip.end - clip.start || 30) * 30)}
                           compositionWidth={1080} compositionHeight={1920} fps={30}
                           style={{ width: '100%', height: '100%', objectFit: 'contain' }} controls
-                          inputProps={{ transcript, isPlayer: true }}
+                          inputProps={{
+                            transcript: { ...transcript, ...clip },
+                            isPlayer: true,
+                            preferredLanguage
+                          }}
                         />
                       </div>
                     </div>
@@ -283,9 +418,12 @@ export default function Home() {
                         </div>
                         <div className="flex-1 rounded-xl bg-transparent border-l-2 border-white/5 pl-4 max-h-[250px] overflow-y-auto custom-scrollbar">
                           <div className="text-xs font-medium text-neutral-300 leading-relaxed">
-                            {/* Rendering words (in a real scenario, filter based on clip start/end) */}
-                            {transcript?.words?.map((w: any, id: number) => <span key={id} className="hover:text-white transition-colors cursor-default">{w.word} </span>)}
+                            {/* Rendering words based on preferred language – FIX: using clip.words_es / clip.words */}
+                            {(preferredLanguage === 'es' && clip?.words_es ? clip.words_es : clip?.words)?.map((w: any, id: number) => (
+                              <span key={id} className="hover:text-white transition-colors cursor-default">{w.word} </span>
+                            ))}
                           </div>
+
                         </div>
                       </div>
                     </div>
@@ -327,88 +465,163 @@ export default function Home() {
 
           <div className="flex items-center justify-between px-8 py-6 border-t border-white/5 bg-black/40 rounded-b-[2.3rem]">
             <div className="flex gap-6">
-              <button className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-neutral-500 hover:text-white transition-all">
+              <button className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-neutral-500 hover:text-white transition-all cursor-pointer">
                 <Upload className="w-4 h-4" /> Upload
               </button>
-              <button className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-neutral-500 hover:text-white transition-all">
+              <button className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-neutral-500 hover:text-white transition-all cursor-pointer">
                 <Cloud className="w-4 h-4" /> Google Drive
               </button>
             </div>
 
             <button
               onClick={handleProcess}
-              disabled={status.status !== 'idle' && status.status !== 'failed'}
-              className="bg-white text-black px-12 py-5 rounded-[1.5rem] font-black uppercase text-[12px] tracking-tighter hover:bg-neutral-200 transition-all shadow-[0_10px_40px_rgba(255,255,255,0.1)] active:scale-95 disabled:opacity-30"
+              disabled={isLaunching}
+              className={`bg-white text-black px-12 py-5 rounded-[1.5rem] font-black uppercase text-[12px] tracking-tighter transition-all shadow-[0_10px_40px_rgba(255,255,255,0.1)] active:scale-95 flex items-center gap-2
+                ${isLaunching ? 'opacity-50 cursor-wait bg-neutral-400' : 'hover:bg-neutral-200 cursor-pointer'}`}
             >
-              {status.status === 'idle' || status.status === 'failed' ? 'Get clips in 1 click' : 'Analyzing...'}
+              {isLaunching ? (
+                <>
+                  <div className="w-3 h-3 border-2 border-black/30 border-t-black rounded-full animate-spin" />
+                  Starting...
+                </>
+              ) : 'Analyze'}
             </button>
+
+          </div>
+
+          {/* LOADING LINE (CONTAINED WITHIN CARD) */}
+          <div className="mx-8 mt-2 h-[3px] overflow-hidden rounded-full">
+            {isLaunching && (
+              <div className="h-full bg-sky-500/30 w-full relative">
+                <div className="absolute top-0 bottom-0 bg-white animate-[loadingLine_2s_infinite_linear] w-[60%] shadow-[0_0_25px_rgba(255,255,255,1)]" />
+              </div>
+            )}
           </div>
         </div>
+
+        {/* ALERT BANNER (OUTSIDE / BELOW CARD) */}
+        {alert && (
+          <div className={`mt-6 w-full flex items-center gap-4 border py-5 px-8 rounded-[2.5rem] animate-in fade-in slide-in-from-top-2 duration-500 shadow-2xl transition-colors
+            ${alert.type === 'error' ? 'bg-rose-500/10 border-rose-500/10 text-rose-500/90' : 'bg-amber-500/10 border-amber-500/10 text-amber-500/90'}`}>
+            <ShieldAlert className="w-5 h-5 shrink-0 opacity-70" />
+            <p className="flex-1 text-[11px] font-bold tracking-tight">
+              {alert.msg}
+            </p>
+            <button onClick={() => setAlert(null)} className="p-1.5 hover:bg-white/10 rounded-full transition-all">
+              <Check className="w-4 h-4" />
+            </button>
+          </div>
+        )}
       </div>
 
       {/* PROJECTS CONTAINER */}
-      {(status.status !== 'idle' || transcript) && (
-        <div className="mt-16 w-full max-w-2xl grid grid-cols-2 gap-6 animate-in fade-in slide-in-from-bottom-8 duration-700">
-          <div
-            onClick={() => transcript && setView('results')}
-            className={`relative group h-48 rounded-[2rem] border overflow-hidden p-6 flex flex-col justify-end transition-all cursor-pointer ${transcript ? 'bg-neutral-900 border-white/10 hover:border-white/30' : status.status === 'failed' ? 'bg-red-500/5 border-red-500/20' : 'bg-black border-white/5'}`}
-          >
-            {status.status === 'failed' && <div className="absolute inset-0 bg-red-500/5 z-0" />}
-            {transcript ? (
-              <div className="absolute inset-0 bg-gradient-to-t from-black via-black/20 to-transparent z-10" />
-            ) : (
-              <div className="absolute inset-0 bg-[#050505] animate-pulse z-0" />
-            )}
+      {/* PROJECTS GRID */}
+      <div className="mt-16 w-full max-w-4xl grid grid-cols-2 md:grid-cols-3 gap-6 animate-in fade-in slide-in-from-bottom-8 duration-700">
 
-            {/* Fake thumbnail content */}
-            <div className="absolute inset-0 flex items-center justify-center opacity-10">
-              <Video className="w-24 h-24" />
-            </div>
+        {/* Existing & Active Projects are now consolidated in one list */}
 
-            <div className="relative z-20">
-              <h4 className={`text-xs font-black uppercase tracking-widest mb-1 ${status.status === 'failed' ? 'text-red-500' : 'text-white/50'}`}>
-                {transcript ? 'Current Project' : status.status === 'failed' ? 'Pipeline Failed' : 'Processing...'}
-              </h4>
-              <p className={`text-sm font-bold truncate max-w-[200px] ${status.status === 'failed' ? 'text-red-400' : 'text-white'}`}>
-                {transcript?.clips?.[0]?.title || url || 'Inbound Video Job'}
-              </p>
-            </div>
+        {/* Existing Projects */}
+        {Array.isArray(projects) && projects.map((proj) => {
+          const isProcessing = proj.isActive;
+          const isFailed = proj.status === 'failed';
 
-            {/* Progress/Loading Bar at the bottom */}
-            {!transcript && (
-              <div className="absolute bottom-0 left-0 right-0 h-1 bg-white/5 overflow-hidden">
-                <div className="h-full bg-white transition-all duration-1000" style={{ width: `${status.progress}%` }} />
-              </div>
-            )}
-            {transcript && (
-              <div className="absolute top-6 right-6 z-20 p-2 bg-purple-600 rounded-full shadow-2xl scale-0 group-hover:scale-100 transition-transform">
-                <ChevronRight className="w-4 h-4" />
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ERROR FOOTER */}
-      {status.status === 'failed' && (
-        <div className="mt-8 w-full max-w-2xl animate-in fade-in slide-in-from-top-4 duration-500">
-          <div className="bg-red-500/10 border border-red-500/20 px-8 py-6 rounded-[2.5rem] flex items-center justify-between gap-6">
-            <div className="flex items-center gap-4">
-              <ShieldAlert className="w-6 h-6 text-red-500" />
-              <div className="flex flex-col">
-                <span className="text-[10px] font-black uppercase text-red-500 tracking-widest">Aviso del Sistema</span>
-                <span className="text-xs font-bold text-red-400/80 leading-relaxed">Hubo un fallo en el proceso, estamos trabajando para solucionarlo.</span>
-              </div>
-            </div>
-            <button
-              onClick={handleReset}
-              className="px-6 py-3 bg-red-500/20 hover:bg-red-500/40 text-red-500 text-[9px] font-black uppercase rounded-xl transition-all"
+          return (
+            <div
+              key={proj.version}
+              onClick={() => !isProcessing && !isFailed && loadProject(proj.version)}
+              className={`relative group h-48 rounded-[2rem] border overflow-hidden p-6 flex flex-col justify-end transition-all cursor-pointer 
+                ${isProcessing ? 'border-sky-500/50 bg-sky-950/20 cursor-wait' :
+                  isFailed ? 'border-red-500/40 bg-red-950/10 cursor-default' :
+                    'border-white/5 bg-neutral-900 hover:border-white/20 hover:scale-[1.02]'}`}
             >
-              Reintentar
-            </button>
+              <div className="absolute inset-0 bg-gradient-to-t from-black via-black/20 to-transparent z-10" />
+
+              {/* Delete Button - Only for completed or failed projects */}
+              {!isProcessing && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); setShowDeleteModal(proj.version); }}
+                  className="absolute top-4 right-4 z-30 p-2 bg-black/50 hover:bg-red-500/80 text-white rounded-full opacity-0 group-hover:opacity-100 transition-all scale-75 group-hover:scale-100"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+              )}
+
+              <div className="absolute inset-0 flex items-center justify-center opacity-10">
+                <Video className={`w-24 h-24 ${isProcessing ? 'animate-pulse text-sky-400' : ''}`} />
+              </div>
+
+              <div className="relative z-20">
+                <div className="flex flex-col gap-1 mb-3">
+                  <p className="text-sm font-bold truncate text-white">
+                    {proj.title}
+                  </p>
+                  <h4 className="text-[10px] font-black uppercase tracking-widest text-white/50 flex justify-between items-center">
+                    <span>{new Date(proj.timestamp * 1000).toLocaleDateString()} • {new Date(proj.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}</span>
+                    {isProcessing && <span className="bg-sky-500 text-white px-2 py-0.5 rounded-full animate-pulse text-[8px] tracking-tight">EN PROCESO</span>}
+                    {isFailed && <span className="bg-red-500 text-white px-2 py-0.5 rounded-full text-[8px] tracking-tight">ERROR</span>}
+                  </h4>
+                </div>
+
+                {isProcessing && (
+                  <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-sky-500 transition-all duration-500"
+                      style={{ width: `${proj.progress}%` }}
+                    />
+                    <p className="text-[10px] text-sky-400 font-bold mt-2 animate-pulse uppercase tracking-tighter">
+                      {proj.message || 'Processing...'}
+                    </p>
+                  </div>
+                )}
+
+                {isFailed && (
+                  <p className="text-[10px] text-red-500 font-bold mt-2 uppercase tracking-tighter truncate">
+                    {proj.error || 'Error desconocido'}
+                  </p>
+                )}
+              </div>
+
+              {!isProcessing && (
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20 p-4 bg-white/10 backdrop-blur-md rounded-full shadow-2xl opacity-0 group-hover:opacity-100 transition-all scale-50 group-hover:scale-100 cursor-pointer">
+                  <Play className="w-6 h-6 fill-white" />
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* DELETE CONFIRMATION MODAL */}
+      {showDeleteModal && (
+        <div className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-sm flex items-center justify-center p-6 animate-in fade-in duration-300">
+          <div className="max-w-md w-full bg-[#0a0a0a] border border-white/10 p-10 rounded-[3rem] text-center shadow-[0_0_100px_rgba(0,0,0,1)]">
+            <div className="w-20 h-20 bg-red-500/10 rounded-full flex items-center justify-center mx-auto mb-8">
+              <ShieldAlert className="w-10 h-10 text-red-500" />
+            </div>
+            <h2 className="text-2xl font-black uppercase text-white mb-4 tracking-tighter">Eliminar Proyecto</h2>
+            <p className="text-neutral-400 text-sm mb-10 leading-relaxed">
+              ¿Estás seguro de que quieres borrar este proyecto? Se eliminarán permanentemente todos los videos, audios y archivos asociados.
+            </p>
+            <div className="flex gap-4">
+              <button
+                onClick={() => setShowDeleteModal(null)}
+                className="flex-1 px-8 py-4 bg-white/5 hover:bg-white/10 text-white font-bold rounded-2xl uppercase text-[10px] tracking-widest transition-all cursor-pointer"
+              >
+                No, cancelar
+              </button>
+              <button
+                onClick={() => handleDeleteProject(showDeleteModal)}
+                className="flex-1 bg-red-600 hover:bg-red-500 text-white font-black py-4 rounded-2xl uppercase text-[10px] tracking-widest transition-all shadow-2xl shadow-red-500/20"
+              >
+                Sí, eliminar
+              </button>
+            </div>
           </div>
         </div>
       )}
+
+
+
     </main>
   );
 
@@ -416,16 +629,30 @@ export default function Home() {
     <main className="min-h-screen bg-black text-white font-sans flex flex-col">
       <nav className="border-b border-white/10 px-8 flex items-center justify-between h-16">
         <div className="flex items-center gap-4">
-          <button onClick={() => setView('results')} className="p-2 hover:bg-white/5 rounded-full transition-all">
+          <button onClick={() => setView('results')} className="p-2 hover:bg-white/5 rounded-full transition-all cursor-pointer">
             <ChevronRight className="w-5 h-5 rotate-180" />
           </button>
           <h1 className="text-xl font-bold tracking-tighter uppercase">RocotoClip <span className="text-neutral-500">Editor</span></h1>
         </div>
         <div className="flex items-center gap-6">
-          <button onClick={handleReset} className="text-[10px] font-bold uppercase text-neutral-500 hover:text-red-500 transition-colors flex items-center gap-2">
-            <RotateCcw className="w-3 h-3" /> Reset Project
-          </button>
-          <button className="bg-white text-black px-6 py-2 rounded-xl text-[10px] font-black uppercase hover:bg-neutral-200 transition-all">
+          <div className="flex bg-white/5 rounded-xl p-1 gap-1 border border-white/5 mr-4">
+            <button
+              onClick={() => setPreferredLanguage('en')}
+              className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${preferredLanguage === 'en' ? 'bg-white text-black' : 'text-neutral-500 hover:text-white'}`}
+            >
+              EN
+            </button>
+            <button
+              onClick={() => setPreferredLanguage('es')}
+              className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${preferredLanguage === 'es' ? 'bg-white text-black' : 'text-neutral-500 hover:text-white'}`}
+            >
+              ES
+            </button>
+          </div>
+          <button
+            onClick={() => handleRender(selectedClipIdx)}
+            className="bg-white text-black px-6 py-2 rounded-xl text-[10px] font-black uppercase hover:bg-neutral-200 transition-all cursor-pointer"
+          >
             Final Render
           </button>
         </div>
@@ -438,9 +665,19 @@ export default function Home() {
           {/* Main Video Area */}
           <div className="flex-1 flex items-center justify-center min-h-0 p-8">
             <div className="h-full aspect-[9/16] bg-black rounded-[2rem] overflow-hidden shadow-2xl border border-white/5">
-              <Player ref={playerRef} component={Main} durationInFrames={Math.ceil((transcript?.duration || 30) * 30)}
-                compositionWidth={1080} compositionHeight={1920} fps={30} style={{ width: '100%', height: '100%' }} controls
-                inputProps={{ transcript, isPlayer: true }} />
+              <Player
+                ref={playerRef}
+                component={Main}
+                durationInFrames={Math.ceil((transcript?.clips?.[selectedClipIdx]?.duration || 30) * 30)}
+                compositionWidth={1080} compositionHeight={1920} fps={30}
+                style={{ width: '100%', height: '100%' }} controls
+                inputProps={{
+                  // Pass the SPECIFIC clip transcript data
+                  transcript: { ...transcript, ...transcript?.clips?.[selectedClipIdx] },
+                  isPlayer: true,
+                  preferredLanguage
+                }}
+              />
             </div>
           </div>
 
@@ -472,7 +709,7 @@ export default function Home() {
                   {(transcript?.clips?.[selectedClipIdx]?.edit_events?.icons || transcript?.edit_events?.icons || []).map((icon: any, idx: number) => (
                     <div key={idx} className="flex items-center gap-2 bg-purple-500/20 px-3 py-1 rounded-md text-[10px] font-black uppercase text-purple-300 border border-purple-500/30 whitespace-nowrap">
                       <span>{icon.keyword} ({parseFloat(icon.time).toFixed(1)}s)</span>
-                      <button onClick={(e) => { e.stopPropagation(); removeEmoji(idx); }} className="p-0.5 hover:bg-black/50 rounded-full text-red-400 opacity-50 hover:opacity-100 transition-opacity">
+                      <button onClick={(e) => { e.stopPropagation(); removeEmoji(idx); }} className="p-0.5 hover:bg-black/50 rounded-full text-red-400 opacity-50 hover:opacity-100 transition-opacity cursor-pointer">
                         <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                       </button>
                     </div>
@@ -512,7 +749,7 @@ export default function Home() {
                   {(transcript?.clips?.[selectedClipIdx]?.end || transcript?.duration || 0).toFixed(2)}s
                 </span>
               </div>
-              <button className="w-full mt-2 py-3 border border-white/10 hover:bg-white/10 text-white rounded-xl text-[9px] font-black uppercase tracking-widest transition-all">
+              <button className="w-full mt-2 py-3 border border-white/10 hover:bg-white/10 text-white rounded-xl text-[9px] font-black uppercase tracking-widest transition-all cursor-pointer">
                 Fine Tune Duration
               </button>
             </div>
@@ -541,16 +778,23 @@ export default function Home() {
   );
 
   return (
-    <GlobalErrorBoundary>
-      {view === 'dashboard' && dashboardView}
-      {view === 'results' && resultsLayout}
-      {view === 'editor' && editorView}
+    <div className="relative min-h-screen bg-black">
+      {/* MAIN CONTENT - NO GHOSTING FOR OPERATIONAL FAILURES */}
+      <div className="transition-all duration-700">
+        {view === 'dashboard' && dashboardView}
+        {view === 'results' && resultsLayout}
+        {view === 'editor' && editorView}
+      </div>
+
+
       <style jsx global>{`
         body { background: black; }
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
         input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 24px; width: 24px; border-radius: 50%; background: #ffffff; cursor: pointer; border: 4px solid #000; box-shadow: 0 0 15px rgba(255,255,255,0.3); }
       `}</style>
-    </GlobalErrorBoundary>
+    </div>
   );
+
+
 }

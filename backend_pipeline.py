@@ -13,6 +13,13 @@ from dotenv import load_dotenv
 # Cargar variables de entorno desde .env
 load_dotenv()
 
+# Debug: Verificar clave de Gemini
+gemini_key = os.environ.get("GEMINI_API_KEY", "")
+if gemini_key:
+    print(f"[Debug] Gemini API Key cargada (termina en: ...{gemini_key[-4:]})")
+else:
+    print("[Debug] ADVERTENCIA: GEMINI_API_KEY no encontrada en el entorno.")
+
 # Configuración de Logging
 LOG_FILE = "pipeline.log"
 logging.basicConfig(
@@ -58,19 +65,31 @@ def transcribe_audio(video_path, model_size="base"):
         logger.info(f"Detected language '{info.language}' with probability {info.language_probability}")
 
         words = []
+        segments_data = []
         full_text = ""
         for segment in segments:
             full_text += segment.text + " "
+            seg_words = []
             for word in segment.words:
-                words.append({
+                w_obj = {
                     "word": word.word.strip(),
                     "start": word.start,
                     "end": word.end
-                })
+                }
+                words.append(w_obj)
+                seg_words.append(w_obj)
+            
+            segments_data.append({
+                "text": segment.text.strip(),
+                "start": segment.start,
+                "end": segment.end,
+                "words": seg_words
+            })
                 
         return {
             "text": full_text.strip(),
-            "words": words
+            "words": words,
+            "segments": segments_data
         }
     except Exception as e:
         logger.error(f"Failed to transcribe audio: {str(e)}")
@@ -105,6 +124,104 @@ def search_pexels_videos(query):
         
     return None
 
+def translate_full_transcript_global(segments_data):
+    """Translates the ENTIRE transcript using 'Anchor Segments' and overlapping context."""
+    if not segments_data: return []
+    
+    logger.info(f"Performing GLOBAL translation for {len(segments_data)} segments...")
+    api_key = os.environ.get("GEMINI_API_KEY")
+    client = genai.Client(api_key=api_key)
+    
+    # 2,000 segments = ~2 hours of video. This is the optimal safety limit for Gemini 2.5/3 Flash output.
+    BATCH_SIZE = 2000
+    all_translated_words = []
+    
+    for i in range(0, len(segments_data), BATCH_SIZE):
+        batch = segments_data[i : i + BATCH_SIZE]
+        batch_texts = [s["text"] for s in batch]
+        
+        # Overlapping Context: Take up to 5 segments from previous batch for flow/tone consistency
+        prev_context = []
+        if i > 0:
+            prev_context = [s["text"] for s in segments_data[max(0, i-5) : i]]
+        
+        prompt = f"""
+        Act as a professional translator. Translate the following list of segments into Spanish.
+        
+        CONTEXT FROM PREVIOUS SEGMENTS (Do NOT translate these, just use for continuity):
+        {json.dumps(prev_context)}
+        
+        SEGMENTS TO TRANSLATE NOW:
+        {json.dumps(batch_texts)}
+        
+        INSTRUCTIONS:
+        1. Maintain a professional, clean, and engaging tone.
+        2. Ensure terminological consistency with the context provided.
+        3. IMPORTANT: Return ONLY a raw JSON array of strings.
+        4. The output array MUST have EXACTLY {len(batch_texts)} strings. Each string corresponds to one segment from 'SEGMENTS TO TRANSLATE NOW'.
+        """
+        
+        translated_texts = []
+        max_retries = 3
+        current_delay = 5
+        
+        for attempt in range(max_retries):
+            try:
+                # For batches this large, we allow more time but fewer calls
+                time.sleep(current_delay) 
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+                translated_texts = json.loads(response.text)
+                
+                if len(translated_texts) >= len(batch):
+                    break # Success
+                else:
+                    logger.warning(f"Batch {i} returned fewer translations than expected ({len(translated_texts)}/{len(batch)}). Retrying...")
+                    time.sleep(current_delay)
+            except Exception as e:
+                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                    logger.warning(f"Quota hit for batch {i}. Retry {attempt+1}/{max_retries} in {current_delay}s...")
+                    time.sleep(current_delay * 2)
+                    current_delay *= 2 # Exponential backoff
+                else:
+                    logger.error(f"Error in batch {i}: {e}")
+                    break
+
+        if translated_texts:
+            if len(translated_texts) != len(batch):
+                logger.warning(f"Translation count mismatch in batch! Expected {len(batch)}, got {len(translated_texts)}. Some segments might lose sync.")
+            
+            # Map back and INTERPOLATE words for each segment
+            for idx, trans_text in enumerate(translated_texts):
+                if idx >= len(batch): break # Security limit
+                orig_seg = batch[idx]
+                seg_start = orig_seg["start"]
+                seg_end = orig_seg["end"]
+                duration = seg_end - seg_start
+                
+                trans_words = trans_text.split()
+                if not trans_words: 
+                    # If empty translation, use original to avoid empty subtitles
+                    trans_words = [w["word"] for w in orig_seg["words"]]
+                
+                # Distribute segment duration across translated words
+                word_dur = duration / len(trans_words)
+                for w_idx, w_text in enumerate(trans_words):
+                    all_translated_words.append({
+                        "word": w_text,
+                        "start": seg_start + (w_idx * word_dur),
+                        "end": seg_start + ((w_idx + 1) * word_dur)
+                    })
+        else:
+            logger.error(f"Global translation batch failed at segment {i} after retries. Falling back to original.")
+            for s in batch:
+                all_translated_words.extend(s["words"])
+                
+    return all_translated_words
+
 def analyze_with_gemini(transcript):
     print("Analyzing transcript with Gemini to find the most viral 60-second clip...")
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -114,50 +231,57 @@ def analyze_with_gemini(transcript):
     client = genai.Client(api_key=api_key)
 
     prompt = f"""
-    Act as a Senior Viral Video Editor (OpusClip/Hormozi style) with a HIGH-END, CLEAN aesthetic.
-    Analyze the transcript and identify the TOP 5 most engaging, viral continuous segments (25-60s each).
-    Segments must be distinct.
+    Act as a Senior Viral Behavioral Engineer and Video Editor (OpusClip/Hormozi style) specialized in 2026 engagement patterns.
+    Identify the TOP 10 most viral independent segments (25-60s) from the transcript. 
+    It is CRITICAL to prioritize segments that justify the user's time investment instantly.
+
+    VIRAL PRINCIPLES (ECOSYSTEM 2026):
+    1. PRIORITIZATION: Value 'Saves' (utility) and 'DM Shares' (relatability) over likes.
+    2. THE 3 C's RULE:
+       - INSTANT CONTEXT: User must understand the topic in <1.5s (Hook).
+       - NARRATIVE CLOSURE: Mini-story arc (Conflict -> Revelation/Solution).
+       - CHARGE: Must provoke a physiological reaction (Laughter, Awe, Indignation) or provide "Save-worthy" utility.
+    3. SEARCH MARKERS (Where to cut):
+       - "THE SHIFT": Inflection points where opinion changes or mistakes are revealed.
+       - COUNTER-INTUITIVE DATA: Challenging the status-quo (e.g., "Why X is killing your Y").
+       - BREAKTHROUGH STORYTELLING: Rapid struggle and success arcs.
+       - SOUNDBITES: Rhythmic, memorable non-generic phrases.
+
+    SCORING LOGIC (1-100):
+    Calculate the score based on:
+    - HOOK (30%): Is it impossible to ignore in <3s?
+    - RELATABILITY (20%): Does it trigger the "It happens to me too" feeling?
+    - SAVE VALUE (30%): Is it info they need to keep for later?
+    - ORIGINALITY (20%): Is it a fresh angle or a copy?
+    Return clips sorted from HIGHEST to LOWEST score.
+
+    HIGH-END EDITING STRATEGY:
+    - SOCIAL SEARCH TITLES: Titles in Spanish that answer specific user questions (e.g., "¿Cómo lograr X...?" instead of "Mi Video").
+    - MICRO-MOVEMENTS: Use zooms/cuts every 2-3s to keep the optic nerve active.
+    - EMOJIS: Use 4-7 icons strictly aligned with concept keywords.
+      AVAILABLE KEYWORDS: 'money', 'cash', 'rich', 'idea', 'think', 'mind', 'warning', 'alert', 'danger', 'stop', 'no', 'error', 'wrong', 'check', 'yes', 'correct', 'ok', 'time', 'clock', 'fast', 'speed', 'heart', 'love', 'hot', 'rocket', 'growth', 'up', 'down', 'work', 'task', 'office', 'success', 'win', 'star', 'laugh', 'funny', 'lol', 'wow', 'shock', 'amazing', 'cool', 'look', 'eye', 'sad', 'bad', 'cry', 'phone', 'computer', 'tech', 'camera', 'video', 'mic', 'search', 'find', 'link', 'lock', 'shield', 'tool', 'fix', 'build', 'book', 'learn', 'write', 'news', 'mail', 'chat', 'home', 'world', 'travel', 'sun', 'moon', 'star_special', 'music', 'sound', 'gift', 'party', 'health'
     
-    CLEAN PROFESSIONAL EDITING STRATEGY (CRITICAL):
-    1. DYNAMIC CUTS (Punch ZoOMS): Use "in" (fast scale jump) sparingly on important punchlines, and "out" to reset. Use a maximum of 2-5 zooms in the ENTIRE clip. Let the content breathe.
-    2. DEPTH & MOVEMENT: Use "ken-burns" during storytelling segments for an extremely subtle, slow drift. NEVER USE "shake" or fast continuous movements.
-    3. PRECISION ICONS (EMOJIS): Use them to reinforce specific concepts or emotions. 
-       - EMOJI ALIGNMENT (MANDATORY): Choose icons that are STRICTLY aligned with what is being said.
-       - SPANISH SUPPORT: If the transcript is in Spanish, map the Spanish concepts to the most appropriate English keywords from the list below.
-       - DENSITY: 4-7 icons total.
-       - AVAILABLE KEYWORDS: 'money', 'cash', 'rich', 'idea', 'think', 'mind', 'warning', 'alert', 'danger', 'stop', 'no', 'error', 'wrong', 'check', 'yes', 'correct', 'ok', 'time', 'clock', 'fast', 'speed', 'heart', 'love', 'hot', 'rocket', 'growth', 'up', 'down', 'work', 'task', 'office', 'success', 'win', 'star', 'laugh', 'funny', 'lol', 'wow', 'shock', 'amazing', 'cool', 'look', 'eye', 'sad', 'bad', 'cry', 'phone', 'computer', 'tech', 'camera', 'video', 'mic', 'search', 'find', 'link', 'lock', 'shield', 'tool', 'fix', 'build', 'book', 'learn', 'write', 'news', 'mail', 'chat', 'home', 'world', 'travel', 'sun', 'moon', 'star_special', 'music', 'sound', 'gift', 'party', 'health'
-    4. B-ROLL: Prioritize finding high-quality short b-roll clips from Pexels for context.
-
-    Output the result as raw JSON (Array of 5 clips):
-
+    Output Format (JSON Array):
     {{
       "clips": [
         {{
           "id": 1,
-          "title": "<Catchy clickbait title in Spanish>",
+          "title": "<Social Search Spanish Title>",
           "score": 0,
-          "hook_score": "A",
-          "flow_score": "A",
-          "value_score": "A",
-          "trend_score": "A",
+          "hook_score": "A+",
+          "save_value": "High",
           "start": 0.0,
           "end": 0.0,
-          "reasoning": "<why this will go viral - in English>",
+          "reasoning": "<Explanation in SPANISH using the 3 C's and viral markers found>",
           "edit_events": {{
-              "zooms": [
-                  {{ "time": 0.0, "type": "in", "intensity": 0.5 }}
-              ],
-              "icons": [
-                  {{ "time": 0.0, "keyword": "money", "layout": "center", "duration": 1.5 }}
-              ],
-              "b_rolls": [
-                  {{ "time": 0.0, "query": "<search_query in English for Pexels>", "duration": 3.0 }}
-              ]
+              "zooms": [{{ "time": 0.0, "type": "in", "intensity": 0.5 }}],
+              "icons": [{{ "time": 0.0, "keyword": "keyword", "layout": "center", "duration": 1.5 }}],
+              "b_rolls": [{{ "time": 0.0, "query": "English Pexels Search", "duration": 3.0 }}]
           }}
         }}
       ]
     }}
-    
+
     Transcript: 
     {json.dumps(transcript['words'][:1500])}
     """
@@ -182,6 +306,7 @@ def analyze_with_gemini(transcript):
     except Exception as e:
         logger.exception(f"Failed to process Gemini response. Response text: {getattr(response, 'text', 'N/A')}")
         raise e
+
 
 def extract_frame(video_path, time_in_seconds, output_path):
     logger.info(f"Extracting frame at {time_in_seconds}s to {output_path}...")
@@ -247,9 +372,9 @@ def detect_face_center_mediapipe(image_path):
         return None
 
 
-def analyze_framing_with_gemini(video_path, start_time, end_time):
-    """Refactored Scene-Based Framing for high precision and scalability."""
-    logger.info("Starting Scene-Based Framing Analysis...")
+def analyze_framing_high_precision_local(video_path, start_time, end_time):
+    """Refactored Scene-Based Framing for high precision and scalability using MediaPipe (LOCAL)."""
+    logger.info("Starting Local HIGH-PRECISION Framing Analysis (MediaPipe)...")
     try:
         import cv2
         import mediapipe as mp
@@ -404,8 +529,8 @@ def analyze_framing_with_gemini(video_path, start_time, end_time):
         "reasoning": f"Scene-First Framer ({len(segments)} cuts found)"
     }
 
-def analyze_framing_with_gemini_old(video_path, start_time, end_time):
-    logger.info("Extracting low-res video proxy for multimodal framing analysis (ASD)...")
+def analyze_framing_multimodal_vision_gemini(video_path, start_time, end_time):
+    logger.info("Extracting low-res video proxy for Gemini Multimodal Vision analysis (ASD)...")
     proxy_path = "framing_proxy.mp4"
     duration = end_time - start_time
     
@@ -461,7 +586,7 @@ def analyze_framing_with_gemini_old(video_path, start_time, end_time):
         
         time.sleep(10) # Pause to avoid rate limit
         response = client.models.generate_content(
-            model='gemini-1.5-flash', 
+            model='gemini-2.5-flash', 
             contents=[video_file, prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
@@ -555,74 +680,102 @@ if __name__ == "__main__":
         # 2. Transcribe
         transcript = transcribe_audio(video_file)
             
+        # 2.5 GLOBAL TRANSLATION (Scaling improvement)
+        full_translated_words = translate_full_transcript_global(transcript['segments'])
+
         # 3. Analyze
         multi_analysis = analyze_with_gemini(transcript)
-        # For now, we only process the first clip (usually highest score) to maintain flow
         if not multi_analysis or "clips" not in multi_analysis or not multi_analysis["clips"]:
             raise ValueError("Gemini failed to identify any viral clips.")
             
-        analysis = multi_analysis["clips"][0]
+        raw_clips = multi_analysis["clips"]
+        # Sort by score desc just in case Gemini didn't
+        raw_clips.sort(key=lambda x: x.get('score', 0), reverse=True)
         
-        # 3.5 Adjust Transcript Timestamps
-        start_time = float(analysis['start'])
-        end_time = float(analysis['end'])
+        # Limit to 10
+        raw_clips = raw_clips[:10]
         
-        adjusted_words = []
-        for w in transcript['words']:
-            if w['end'] > start_time and w['start'] < end_time:
-                adjusted_words.append({
-                    "word": w['word'],
-                    "start": max(0.0, w['start'] - start_time),
-                    "end": w['end'] - start_time
-                })
-                
-        adjusted_transcript = {
-            "text": analysis.get("clip_text", ""), # Note: 'clip_text' might need to be re-added or derived
-            "words": adjusted_words
-        }
+        processed_clips = []
         
-        # 3.8 Intelligent Framing (Gemini Vision)
-        framing_data = analyze_framing_with_gemini(video_file, start_time, end_time)
-        
-        # 3.85 Process B-roll Suggestions and Adjust Times
-        edit_events = analysis.get("edit_events", {"zooms": [], "icons": [], "b_rolls": [], "backgrounds": []})
-        
-        # Adjust timestamps for edit events relative to clip start
-        for key, event_list in edit_events.items():
-            if isinstance(event_list, list):
-                for event in event_list:
-                    if 'time' in event:
-                        event['time'] = max(0.0, float(event['time']) - start_time)
+        for idx, analysis in enumerate(raw_clips):
+            logger.info(f"--- Processing Clip #{idx+1} (Score: {analysis.get('score')}) ---")
+            
+            # Clip-specific filenames
+            clip_id = idx + 1
+            V_OUT = f"video_{version}_clip_{clip_id}.mp4"
+            A_OUT = f"audio_{version}_clip_{clip_id}.wav"
+            
+            # 3.5 Adjust Transcript Timestamps
+            start_time = float(analysis.get('start', 0.0))
+            end_time = float(analysis.get('end', start_time + 30.0))
+            
+            adjusted_words = []
+            for w in transcript['words']:
+                if w['end'] > start_time and w['start'] < end_time:
+                    adjusted_words.append({
+                        "word": w['word'],
+                        "start": max(0.0, w['start'] - start_time),
+                        "end": w['end'] - start_time
+                    })
+            
+            # 3.7 Extract Spanish Translation from Global Pool (CLONE to avoid shared mutation)
+            translated_words = [
+                {**w, "start": max(0.0, w["start"] - start_time), "end": w["end"] - start_time} 
+                for w in full_translated_words 
+                if w['end'] > start_time and w['start'] < end_time
+            ]
+            
+            # 3.8 Intelligent Framing
+            framing_data = analyze_framing_high_precision_local(video_file, start_time, end_time)
+            
+            # 3.85 Process B-roll Suggestions and Adjust Times
+            edit_events = analysis.get("edit_events", {"zooms": [], "icons": [], "b_rolls": [], "backgrounds": []})
+            for key, event_list in edit_events.items():
+                if isinstance(event_list, list):
+                    for event in event_list:
+                        if 'time' in event:
+                            event['time'] = max(0.0, float(event['time']) - start_time)
 
-        # 3.9 Prepare final transcript data for Remotion
+            # 3.9 Store complete data for this clip
+            clip_data = {
+                **analysis,
+                "duration": end_time - start_time,
+                "words": adjusted_words,
+                "words_es": translated_words,
+                "layout": framing_data.get("layout", "single"),
+                "center": framing_data.get("center", 0.5),
+                "center_top": framing_data.get("center_top", 0.5),
+                "center_bottom": framing_data.get("center_bottom", 0.5),
+                "framing_reasoning": framing_data.get("reasoning", ""),
+                "framing_segments": framing_data.get("framing_segments", []),
+                "edit_events": edit_events,
+                "video_url": V_OUT,
+                "audio_url": A_OUT
+            }
+            
+            # 4. Crop and Cut the physical clip
+            process_video_ffmpeg(video_file, V_OUT, start_time, end_time, A_OUT)
+            
+            processed_clips.append(clip_data)
+
+        # Prepare final consolidated manifest
         final_data = {
-            "clips": multi_analysis["clips"], # Keep all clips metadata
-            "text": analysis.get("clip_text", ""),
-            "duration": end_time - start_time,
-            "words": adjusted_words,
-            "layout": framing_data.get("layout", "single"),
-            "center": framing_data.get("center", 0.5),
-            "center_top": framing_data.get("center_top", 0.5),
-            "center_bottom": framing_data.get("center_bottom", 0.5),
-            "framing_reasoning": framing_data.get("reasoning", ""),
-            "framing_segments": framing_data.get("framing_segments", []),
-            "edit_events": edit_events,
-            "video_url": VIDEO_OUT,
-            "audio_url": AUDIO_OUT,
-            "version": version
+            "clips": processed_clips,
+            "version": version,
+            # For backward compatibility, keep top clip markers at root
+            "words": processed_clips[0]["words"],
+            "words_es": processed_clips[0]["words_es"],
+            "video_url": processed_clips[0]["video_url"],
+            "audio_url": processed_clips[0]["audio_url"]
         }
         
         with open(TRANSCRIPT_FILE, "w", encoding="utf-8") as f:
             json.dump(final_data, f, ensure_ascii=False, indent=2)
             
-        # Also maintain a "latest" copy for simple access if needed
         with open("transcript_data.json", "w", encoding="utf-8") as f:
             json.dump(final_data, f, ensure_ascii=False, indent=2)
 
-        # 4. Crop and Cut
-        process_video_ffmpeg(video_file, VIDEO_OUT, start_time, end_time, AUDIO_OUT)
-        
-        logger.info(f"Backend processing pipeline complete! Version: {version}")
+        logger.info(f"Backend processing pipeline complete! Version: {version} (Generated {len(processed_clips)} clips)")
         # Force flush log
         for l in logger.handlers:
             l.flush()

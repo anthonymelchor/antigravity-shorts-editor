@@ -17,6 +17,8 @@ export const metadata: Metadata = {
   description: "Neural AI Video Engine",
 };
 
+import { GlobalErrorBoundary } from "@/components/GlobalErrorBoundary";
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -27,8 +29,11 @@ export default function RootLayout({
       <body
         className={`${outfit.variable} ${geistMono.variable} antialiased`}
       >
-        {children}
+        <GlobalErrorBoundary>
+          {children}
+        </GlobalErrorBoundary>
       </body>
     </html>
   );
 }
+

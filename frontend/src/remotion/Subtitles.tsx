@@ -8,14 +8,22 @@ const { fontFamily } = loadFont();
 interface SubtitlesProps {
     transcript: Transcript;
     currentLayout?: 'single' | 'split';
+    preferredLanguage?: 'en' | 'es';
 }
 
-export const Subtitles: React.FC<SubtitlesProps> = ({ transcript, currentLayout = 'single' }) => {
+export const Subtitles: React.FC<SubtitlesProps> = ({
+    transcript,
+    currentLayout = 'single',
+    preferredLanguage = 'en'
+}) => {
     const frame = useCurrentFrame();
     const { fps } = useVideoConfig();
     const currentTime = frame / fps;
 
-    const words = transcript.words || [];
+    const words = (preferredLanguage === 'es' && transcript.words_es)
+        ? transcript.words_es
+        : (transcript.words || []);
+
 
     // --- CHUNKING LOGIC ---
     // Group words into chunks of up to 4 words.

@@ -7,7 +7,7 @@ load_dotenv()
 api_key = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=api_key)
 
-models_to_test = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash-exp', 'gemini-1.5-flash-8b']
+models_to_test = ['gemini-2.5-flash', 'gemini-2.5-flash-latest', 'gemini-1.5-flash-8b']
 
 for m in models_to_test:
     try:

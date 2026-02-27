@@ -36,11 +36,18 @@ interface MainProps {
     videoSrcOverride?: string;
     isWorkspaceView?: boolean;
     isPlayer?: boolean;
+    preferredLanguage?: 'en' | 'es';
 }
 
 const defaultTranscript: Transcript = transcriptData as unknown as Transcript;
 
-export const Main: React.FC<MainProps> = ({ transcript: propTranscript, videoSrcOverride, isWorkspaceView = false, isPlayer = false }) => {
+export const Main: React.FC<MainProps> = ({
+    transcript: propTranscript,
+    videoSrcOverride,
+    isWorkspaceView = false,
+    isPlayer = false,
+    preferredLanguage = 'en'
+}) => {
     const { fps } = useVideoConfig();
     const frame = useCurrentFrame();
     const currentTime = frame / fps;
@@ -153,7 +160,7 @@ export const Main: React.FC<MainProps> = ({ transcript: propTranscript, videoSrc
             </ZoomManager>
             <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
                 <DynamicLayer events={editEvents} />
-                <Subtitles transcript={transcript} currentLayout={layout} />
+                <Subtitles transcript={transcript} currentLayout={layout} preferredLanguage={preferredLanguage} />
             </div>
         </AbsoluteFill>
     );
@@ -208,7 +215,7 @@ export const Main: React.FC<MainProps> = ({ transcript: propTranscript, videoSrc
                     pointerEvents: 'none'
                 }}>
                     <DynamicLayer events={editEvents} />
-                    <Subtitles transcript={transcript} />
+                    <Subtitles transcript={transcript} preferredLanguage={preferredLanguage} />
                 </div>
             </AbsoluteFill>
 

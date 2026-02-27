@@ -21,8 +21,10 @@ export interface Transcript {
     framing_segments?: FramingSegment[];
     text: string;
     words: any[];
+    words_es?: any[]; // For Spanish translation
     video_url?: string;
     audio_url?: string;
+    preferredLanguage?: 'en' | 'es'; // Added flag
     edit_events?: {
         zooms: any[];
         icons: any[];
@@ -35,11 +37,18 @@ interface MainProps {
     transcript?: Transcript;
     videoSrcOverride?: string;
     isPlayer?: boolean;
+    preferredLanguage?: 'en' | 'es'; // Added prop
 }
 
 const defaultTranscript: Transcript = transcriptData as unknown as Transcript;
 
-export const Main: React.FC<MainProps> = ({ transcript: propTranscript, videoSrcOverride, isPlayer = false }) => {
+export const Main: React.FC<MainProps> = ({
+    transcript: propTranscript,
+    videoSrcOverride,
+    isPlayer = false,
+    preferredLanguage = 'en'
+}) => {
+
     const { fps } = useVideoConfig();
     const frame = useCurrentFrame();
     const currentTime = frame / fps;
@@ -153,7 +162,11 @@ export const Main: React.FC<MainProps> = ({ transcript: propTranscript, videoSrc
             </ZoomManager>
             <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
                 <DynamicLayer events={editEvents} />
-                <Subtitles transcript={transcript} currentLayout={activeLayout} />
+                <Subtitles
+                    transcript={transcript}
+                    currentLayout={activeLayout}
+                    preferredLanguage={preferredLanguage}
+                />
             </div>
         </AbsoluteFill>
     );

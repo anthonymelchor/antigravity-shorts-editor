@@ -85,7 +85,7 @@ def analyze_video_files(original_path, rendered_path):
         
         print("Starting video reasoning analysis...")
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-2.5-flash',
             contents=uploaded_files + [prompt],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
