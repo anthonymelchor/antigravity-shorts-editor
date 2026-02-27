@@ -446,26 +446,62 @@ def analyze_framing_high_precision_local(video_path, start_time, end_time):
                 center_top = 0.5
                 center_bottom = 0.5
 
-                if len(faces) >= 2:
-                    sorted_faces = sorted(faces, key=lambda f: f.bounding_box.origin_x)
-                    f1_center = (sorted_faces[0].bounding_box.origin_x + sorted_faces[0].bounding_box.width/2) / w_f
-                    f2_center = (sorted_faces[1].bounding_box.origin_x + sorted_faces[1].bounding_box.width/2) / w_f
-                    
+                # --- OLD LOGIC (INICIALLY COMMENTED OUT FOR COMPARISON) ---
+                # if len(faces) >= 2:
+                #     sorted_faces = sorted(faces, key=lambda f: f.bounding_box.origin_x)
+                #     f1_center = (sorted_faces[0].bounding_box.origin_x + sorted_faces[0].bounding_box.width/2) / w_f
+                #     f2_center = (sorted_faces[1].bounding_box.origin_x + sorted_faces[1].bounding_box.width/2) / w_f
+                #     
+                #     layout = "split"
+                #     center_top = f1_center
+                #     center_bottom = f2_center
+                #     center = f1_center 
+                # elif len(faces) == 1:
+                #     center = (faces[0].bounding_box.origin_x + faces[0].bounding_box.width/2) / w_f
+                # elif len(people) >= 1:
+                #     p_sorted = sorted(people, key=lambda d: d.categories[0].score, reverse=True)
+                #     center = (p_sorted[0].bounding_box.origin_x + p_sorted[0].bounding_box.width/2) / w_f
+                #     if len(people) >= 2:
+                #         layout = "split"
+                #         p1_x = (people[0].bounding_box.origin_x + people[0].bounding_box.width/2) / w_f
+                #         p2_x = (people[1].bounding_box.origin_x + people[1].bounding_box.width/2) / w_f
+                #         center_top = p1_x
+                #         center_bottom = p2_x
+                # --- END OLD LOGIC ---
+
+                # --- NEW REFINED LOGIC (Cross-Validation) ---
+                # We prioritize the Person Detector to confirm how many humans are actually in the scene.
+                if len(people) >= 2:
+                    # Valid Split Case: 2 or more humans confirmed.
                     layout = "split"
-                    center_top = f1_center
-                    center_bottom = f2_center
-                    center = f1_center 
-                elif len(faces) == 1:
-                    center = (faces[0].bounding_box.origin_x + faces[0].bounding_box.width/2) / w_f
-                elif len(people) >= 1:
-                    p_sorted = sorted(people, key=lambda d: d.categories[0].score, reverse=True)
-                    center = (p_sorted[0].bounding_box.origin_x + p_sorted[0].bounding_box.width/2) / w_f
-                    if len(people) >= 2:
+                    p_sorted = sorted(people, key=lambda d: d.bounding_box.origin_x)
+                    p1_x = (p_sorted[0].bounding_box.origin_x + p_sorted[0].bounding_box.width/2) / w_f
+                    p2_x = (p_sorted[1].bounding_box.origin_x + p_sorted[1].bounding_box.width/2) / w_f
+                    center_top = p1_x
+                    center_bottom = p2_x
+                    center = p1_x
+                elif len(people) == 1:
+                    # Single Human Confirmed. Even if Face Detector finds 2+, we trust the person count.
+                    layout = "single"
+                    p_center = (people[0].bounding_box.origin_x + people[0].bounding_box.width/2) / w_f
+                    # If we have a clear face for this single person, use the face center for more precision.
+                    if len(faces) >= 1:
+                        # Find face closest to the person
+                        face_best = min(faces, key=lambda f: abs(((f.bounding_box.origin_x + f.bounding_box.width/2)/w_f) - p_center))
+                        center = (face_best.bounding_box.origin_x + face_best.bounding_box.width/2) / w_f
+                    else:
+                        center = p_center
+                elif len(faces) >= 1:
+                    # Fallback: No persons detected, but faces found.
+                    if len(faces) >= 2:
                         layout = "split"
-                        p1_x = (people[0].bounding_box.origin_x + people[0].bounding_box.width/2) / w_f
-                        p2_x = (people[1].bounding_box.origin_x + people[1].bounding_box.width/2) / w_f
-                        center_top = p1_x
-                        center_bottom = p2_x
+                        f_sorted = sorted(faces, key=lambda f: f.bounding_box.origin_x)
+                        center_top = (f_sorted[0].bounding_box.origin_x + f_sorted[0].bounding_box.width/2) / w_f
+                        center_bottom = (f_sorted[1].bounding_box.origin_x + f_sorted[1].bounding_box.width/2) / w_f
+                        center = center_top
+                    else:
+                        center = (faces[0].bounding_box.origin_x + faces[0].bounding_box.width/2) / w_f
+                # --- END NEW LOGIC ---
 
                 segments.append({
                     "start": frame_idx / fps,
