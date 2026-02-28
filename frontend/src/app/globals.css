@@ -21,6 +21,16 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Global Interactive Cursor - RocotoClip Standard */
+button, 
+a, 
+input[type="button"], 
+input[type="submit"], 
+input[type="reset"],
+select {
+  cursor: pointer !important;
+}
+
 /* Custom Scrollbar for a premium look */
 ::-webkit-scrollbar {
   width: 6px;
