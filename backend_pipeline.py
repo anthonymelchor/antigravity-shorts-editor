@@ -225,7 +225,19 @@ def translate_full_transcript_global(segments_data):
     return all_translated_words
 
 def analyze_with_gemini(transcript):
-    print("Analyzing transcript with Gemini to find the most viral 60-second clip...")
+    """
+    MOTOR DE EXTRACCIÓN DE MOMENTOS PICO
+    
+    Detects and extracts specific segments with high virality potential
+    in short format (23-75 seconds). Uses strict criteria for emotional
+    intensity, structural clarity, and narrative autonomy.
+    
+    Scoring: +3/+2/+1 system (max ~17), threshold ≥ 4.
+    Classification: EXPLOSION / AUTORIDAD / CONVERSION per clip.
+    No hard limit on clips — quality is the only filter.
+    """
+    logger.info("=== MOTOR DE EXTRACCIÓN DE MOMENTOS PICO ===")
+    logger.info("Analyzing transcript for high-intensity peak moments...")
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable not set.")
@@ -233,60 +245,124 @@ def analyze_with_gemini(transcript):
     client = genai.Client(api_key=api_key)
 
     prompt = f"""
-    Act as a Senior Viral Behavioral Engineer and Video Editor (OpusClip/Hormozi style) specialized in 2026 engagement patterns.
-    Identify the TOP 10 most viral independent segments (35-70s) from the transcript. 
-    It is CRITICAL to prioritize segments that justify the user's time investment instantly.
+You are an expert viral content editor for high-performance faceless social media accounts.
+You are NOT summarizing the video. You are detecting and extracting specific segments
+with high virality potential in short format (23-75 seconds).
 
-    VIRAL PRINCIPLES (ECOSYSTEM 2026):
-    1. PRIORITIZATION: Value 'Saves' (utility) and 'DM Shares' (relatability) over likes.
-    2. THE 3 C's RULE:
-       - INSTANT CONTEXT: User must understand the topic in <1.5s (Hook).
-       - NARRATIVE CLOSURE: Mini-story arc (Conflict -> Revelation/Solution).
-       - CHARGE: Must provoke a physiological reaction (Laughter, Awe, Indignation) or provide "Save-worthy" utility.
-    3. SEARCH MARKERS (Where to cut):
-       - "THE SHIFT": Inflection points where opinion changes or mistakes are revealed.
-       - COUNTER-INTUITIVE DATA: Challenging the status-quo (e.g., "Why X is killing your Y").
-       - BREAKTHROUGH STORYTELLING: Rapid struggle and success arcs.
-       - SOUNDBITES: Rhythmic, memorable non-generic phrases.
+=== MANDATORY CLIP RULES ===
+A fragment is ONLY valid if it meets ALL of these conditions:
+1. Can be understood WITHOUT prior context
+2. Contains a COMPLETE idea (beginning + development + mini-closure)
+3. Has a strong or disruptive phrase in the FIRST 5 seconds
+4. Generates clear emotion (controversy, revelation, warning, validation, diagnosis)
+5. Does NOT depend on unexplained proper nouns
+6. Is NOT an introduction or farewell
 
-    SCORING LOGIC (1-100):
-    Calculate the score based on:
-    - HOOK (30%): Is it impossible to ignore in <3s?
-    - RELATABILITY (20%): Does it trigger the "It happens to me too" feeling?
-    - SAVE VALUE (30%): Is it info they need to keep for later?
-    - ORIGINALITY (20%): Is it a fresh angle or a copy?
-    Return clips sorted from HIGHEST to LOWEST score.
+=== DURATION ===
+MINIMUM: 23 seconds | IDEAL: 35-55 seconds | MAXIMUM: 75 seconds
+Reject fragments < 20 seconds or > 90 seconds.
+If a powerful idea lasts > 75s, find the most intense sub-fragment within it.
 
-    HIGH-END EDITING STRATEGY:
-    - SOCIAL SEARCH TITLES: Titles in Spanish that answer specific user questions (e.g., "¿Cómo lograr X...?" instead of "Mi Video").
-    - MICRO-MOVEMENTS: Use zooms/cuts every 2-3s to keep the optic nerve active.
-    - EMOJIS: Use 4-7 icons strictly aligned with concept keywords.
-      AVAILABLE KEYWORDS: 'money', 'cash', 'rich', 'idea', 'think', 'mind', 'warning', 'alert', 'danger', 'stop', 'no', 'error', 'wrong', 'check', 'yes', 'correct', 'ok', 'time', 'clock', 'fast', 'speed', 'heart', 'love', 'hot', 'rocket', 'growth', 'up', 'down', 'work', 'task', 'office', 'success', 'win', 'star', 'laugh', 'funny', 'lol', 'wow', 'shock', 'amazing', 'cool', 'look', 'eye', 'sad', 'bad', 'cry', 'phone', 'computer', 'tech', 'camera', 'video', 'mic', 'search', 'find', 'link', 'lock', 'shield', 'tool', 'fix', 'build', 'book', 'learn', 'write', 'news', 'mail', 'chat', 'home', 'world', 'travel', 'sun', 'moon', 'star_special', 'music', 'sound', 'gift', 'party', 'health'
-    
-    Output Format (JSON Array):
+=== MANDATORY SCORING SYSTEM ===
+Score each potential fragment by SUMMING these points:
++3 if it challenges a common belief
++3 if it contains an unexpected revelation
++2 if it contains a strong warning
++2 if it contains a specific error/mistake
++2 if it contains clear psychological diagnosis
++2 if it includes a personal micro-story
++2 if it generates potential debate
++1 if it offers actionable practical advice
+
+A clip is valid ONLY if it scores >= 4. Prioritize clips with score >= 7.
+
+=== PEAK MOMENT DETECTORS ===
+Prioritize fragments where you detect:
+- Change in verbal intensity
+- Phrases repeated for emphasis
+- Strong language use
+- Clear contradictions
+- Phrases like: "La verdad es que...", "Nadie quiere admitir esto...",
+  "Si sigues haciendo esto...", "El problema real es...", "Lo que realmente pasa es..."
+
+=== MANDATORY CLIP CLASSIFICATION ===
+Label each clip as (max 2 labels):
+- EXPLOSION: Generates polemic, can provoke disagreement, challenges dominant narrative
+- AUTORIDAD: Explains a mental framework, teaches clear psychology, strong logical structure
+- CONVERSION: Identifies specific pain, points out concrete error, allows indirect CTA
+
+=== STRATEGIC MIX ===
+Aim for approximately: 50% EXPLOSION | 30% AUTORIDAD | 20% CONVERSION
+If the video doesn't allow clear conversion, prioritize EXPLOSION.
+
+=== FINAL QUALITY FILTER ===
+Before returning a clip, verify:
+1. Is the first second strong enough to retain viewers?
+2. Can it be used as a short without additional explanation?
+3. Can it generate comments?
+4. Does it have a phrase that can be used as an impactful subtitle?
+If the answer is NO to 2 or more questions, DISCARD the clip.
+
+=== WHAT NOT TO DO ===
+❌ Do NOT select loose phrases without development
+❌ Do NOT choose generic parts like "we need to improve"
+❌ Do NOT choose flat educational content without tension
+❌ Do NOT choose fragments that depend on prior context
+❌ Do NOT choose long stories without a strong point
+❌ Do NOT choose parts where the speaker is rambling
+
+=== LEVEL OF DEMAND ===
+It is NOT mandatory to find clips if the content doesn't meet criteria.
+It is preferable to return:
+"NO CLIPS FOUND — INSUFFICIENT INTENSITY"
+than to return weak clips.
+
+=== EDITING STRATEGY ===
+- SOCIAL SEARCH TITLES: Generate titles in Spanish that answer specific user questions
+  (e.g., "¿Por qué siempre fracasas?" instead of generic titles).
+- MICRO-MOVEMENTS: Suggest zooms/cuts every 2-3s to keep visual engagement.
+- EMOJIS: Use 4-7 icons aligned with concept keywords.
+  AVAILABLE KEYWORDS: 'money', 'cash', 'rich', 'idea', 'think', 'mind', 'warning', 'alert',
+  'danger', 'stop', 'no', 'error', 'wrong', 'check', 'yes', 'correct', 'ok', 'time', 'clock',
+  'fast', 'speed', 'heart', 'love', 'hot', 'rocket', 'growth', 'up', 'down', 'work', 'task',
+  'office', 'success', 'win', 'star', 'laugh', 'funny', 'lol', 'wow', 'shock', 'amazing',
+  'cool', 'look', 'eye', 'sad', 'bad', 'cry', 'phone', 'computer', 'tech', 'camera', 'video',
+  'mic', 'search', 'find', 'link', 'lock', 'shield', 'tool', 'fix', 'build', 'book', 'learn',
+  'write', 'news', 'mail', 'chat', 'home', 'world', 'travel', 'sun', 'moon', 'star_special',
+  'music', 'sound', 'gift', 'party', 'health'
+
+=== OUTPUT FORMAT (JSON) ===
+Return ONLY clips that score >= 4. If no clips meet criteria, return:
+{{"clips": [], "message": "NO CLIPS FOUND — INSUFFICIENT INTENSITY"}}
+
+Otherwise return:
+{{
+  "clips": [
     {{
-      "clips": [
-        {{
-          "id": 1,
-          "title": "<Social Search Spanish Title>",
-          "score": 0,
-          "hook_score": "A+",
-          "save_value": "High",
-          "start": 0.0,
-          "end": 0.0,
-          "reasoning": "<Explanation in SPANISH using the 3 C's and viral markers found>",
-          "edit_events": {{
-              "zooms": [{{ "time": 0.0, "type": "in", "intensity": 0.5 }}],
-              "icons": [{{ "time": 0.0, "keyword": "keyword", "layout": "center", "duration": 1.5 }}],
-              "b_rolls": [{{ "time": 0.0, "query": "English Pexels Search", "duration": 3.0 }}]
-          }}
-        }}
-      ]
+      "id": 1,
+      "title": "<Social Search Spanish Title>",
+      "start": 0.0,
+      "end": 0.0,
+      "score": 0,
+      "score_factors": ["challenges common belief (+3)", "strong warning (+2)"],
+      "classification": ["EXPLOSION"],
+      "dominant_emotion": "indignación",
+      "virality_level": 8,
+      "reasoning": "<Strategic explanation in SPANISH, 1-2 lines>",
+      "edit_events": {{
+          "zooms": [{{"time": 0.0, "type": "in", "intensity": 0.5}}],
+          "icons": [{{"time": 0.0, "keyword": "keyword", "layout": "center", "duration": 1.5}}],
+          "b_rolls": [{{"time": 0.0, "query": "English Pexels Search", "duration": 3.0}}]
+      }}
     }}
+  ]
+}}
 
-    Transcript: 
-    {json.dumps(transcript['words'][:1500])}
-    """
+Sort clips from HIGHEST to LOWEST score.
+
+=== TRANSCRIPT TO ANALYZE ===
+{json.dumps(transcript['words'][:2000])}
+"""
 
     time.sleep(1)  # Brief pause to avoid 429 rate limit
     response = None
@@ -310,9 +386,34 @@ def analyze_with_gemini(transcript):
         clean_text = re.sub(r'\s*\(use [^)]+\)', '', raw_text)
         
         result = json.loads(clean_text)
+        
         if "clips" in result and len(result["clips"]) > 0:
-            best_clip = result["clips"][0]
-            logger.info(f"Gemini identified {len(result['clips'])} potential clips. Best starts at {best_clip.get('start')}s.")
+            # Post-processing: enforce score threshold ≥ 6
+            valid_clips = [c for c in result["clips"] if c.get("score", 0) >= 6]
+            rejected_count = len(result["clips"]) - len(valid_clips)
+            
+            if rejected_count > 0:
+                logger.info(f"Filtered out {rejected_count} clips with score < 6")
+            
+            # Enforce duration limits (22-75 seconds)
+            duration_valid = []
+            for c in valid_clips:
+                clip_duration = float(c.get('end', 0)) - float(c.get('start', 0))
+                if 18 <= clip_duration <= 90:  # Soft bounds for safety
+                    duration_valid.append(c)
+                else:
+                    logger.info(f"Filtered clip '{c.get('title', '')}' — duration {clip_duration:.1f}s out of range")
+            
+            result["clips"] = duration_valid
+            
+            if duration_valid:
+                best_clip = duration_valid[0]
+                logger.info(f"Peak Moment Engine found {len(duration_valid)} valid clips (score ≥ 6). "
+                           f"Best: score={best_clip.get('score')}, starts at {best_clip.get('start')}s")
+            else:
+                logger.warning("All clips filtered out — NO CLIPS FOUND with sufficient intensity")
+        else:
+            logger.warning("Gemini returned NO CLIPS — INSUFFICIENT INTENSITY in transcript")
         
         return result
     except Exception as e:
@@ -786,11 +887,11 @@ if __name__ == "__main__":
             raise ValueError("Gemini failed to identify any viral clips.")
             
         raw_clips = multi_analysis["clips"]
-        # Sort by score desc just in case Gemini didn't
+        # Sort by score desc (Gemini should already do this, but ensure it)
         raw_clips.sort(key=lambda x: x.get('score', 0), reverse=True)
         
-        # Limit to 10
-        raw_clips = raw_clips[:10]
+        # NO hard limit — clips are already filtered by score ≥ 4 in analyze_with_gemini
+        logger.info(f"Processing {len(raw_clips)} clips that passed peak moment scoring (score ≥ 4)")
         
         processed_clips = []
         

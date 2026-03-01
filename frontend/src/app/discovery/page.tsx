@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Search, Flame, Play, CheckCircle, Info, ArrowLeft, ExternalLink, Zap, Sparkles, RefreshCw, Check } from "lucide-react";
+import { Search, Flame, Play, CheckCircle, Info, ArrowLeft, ExternalLink, Zap, Sparkles, RefreshCw, Check, Filter } from "lucide-react";
 import Link from "next/link";
 import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
 
@@ -21,6 +21,13 @@ export default function DiscoveryPage() {
     const supabase = createClientComponentClient();
     const [candidates, setCandidates] = useState<Candidate[]>([]);
     const [loading, setLoading] = useState(true);
+    const [nicheFilter, setNicheFilter] = useState<string | null>(null);
+
+    // Derive unique niches from candidates
+    const uniqueNiches = Array.from(new Set(candidates.map(c => c.niche).filter(Boolean)));
+    const filteredCandidates = nicheFilter
+        ? candidates.filter(c => c.niche === nicheFilter)
+        : candidates;
     const [approvingId, setApprovingId] = useState<number | null>(null);
 
     // Authenticated fetch helper
@@ -39,7 +46,7 @@ export default function DiscoveryPage() {
         });
     };
 
-    const [nicheLimit, setNicheLimit] = useState(5);
+
     const [isDiscovering, setIsDiscovering] = useState(false);
     const [discoveryStatus, setDiscoveryStatus] = useState<any>(null);
     const [alert, setAlert] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
@@ -117,7 +124,7 @@ export default function DiscoveryPage() {
         });
         setAlert(null);
         try {
-            const res = await authFetch(`${API_BASE}/api/discovery/run?limit=${nicheLimit}`, { method: 'POST' });
+            const res = await authFetch(`${API_BASE}/api/discovery/run`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json();
                 setAlert({ msg: data.detail || 'Error starting discovery', type: 'error' });
@@ -196,26 +203,6 @@ export default function DiscoveryPage() {
                     </div>
 
                     <div className="flex items-center gap-4 bg-black/40 p-2 rounded-3xl border border-white/5">
-                        <div className="flex items-center gap-3 pl-6 pr-4 border-r border-white/5">
-                            <span className="text-[10px] font-black uppercase tracking-widest text-neutral-600">Videos por Nicho</span>
-                            <div className={`flex items-center gap-4 bg-white/5 px-4 py-2 rounded-2xl border border-white/10 ${isDiscovering ? 'opacity-30' : ''}`}>
-                                <button
-                                    onClick={() => setNicheLimit(Math.max(1, nicheLimit - 1))}
-                                    disabled={isDiscovering}
-                                    className="hover:text-white text-neutral-500 transition-colors font-bold px-1 disabled:cursor-not-allowed"
-                                >
-                                    -
-                                </button>
-                                <span className="text-xs font-black w-4 text-center">{nicheLimit}</span>
-                                <button
-                                    onClick={() => setNicheLimit(Math.min(10, nicheLimit + 1))}
-                                    disabled={isDiscovering}
-                                    className="hover:text-white text-neutral-500 transition-colors font-bold px-1 disabled:cursor-not-allowed"
-                                >
-                                    +
-                                </button>
-                            </div>
-                        </div>
 
                         <button
                             onClick={handleRunDiscovery}
@@ -288,57 +275,93 @@ export default function DiscoveryPage() {
                         <span className="text-neutral-500 text-[8px] font-bold uppercase tracking-widest mt-2">Consultando Engine Neural</span>
                     </div>
                 ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                        <AnimatePresence mode="popLayout">
-                            {candidates.map((c) => (
-                                <motion.div
-                                    key={c.id}
-                                    layout
-                                    initial={{ opacity: 0, y: 20 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    exit={{ opacity: 0, scale: 0.95 }}
-                                    className="group bg-[#0a0a0a] border border-white/5 rounded-[2.5rem] p-8 hover:border-white/10 transition-all duration-500 relative overflow-hidden"
+                    <>
+                        {/* NICHE FILTER BAR */}
+                        {uniqueNiches.length > 1 && (
+                            <div className="flex items-center gap-3 mb-8 flex-wrap">
+                                <div className="flex items-center gap-2 text-neutral-600 mr-2">
+                                    <Filter className="w-3.5 h-3.5" />
+                                    <span className="text-[10px] font-black uppercase tracking-widest">Filtrar</span>
+                                </div>
+                                <button
+                                    onClick={() => setNicheFilter(null)}
+                                    className={`px-5 py-2 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all
+                                        ${!nicheFilter
+                                            ? 'bg-white text-black border-white shadow-[0_0_15px_rgba(255,255,255,0.1)]'
+                                            : 'bg-transparent text-neutral-500 border-white/10 hover:border-white/20 hover:text-white'}`}
                                 >
-                                    <div className="flex justify-between items-start mb-6">
-                                        <span className="bg-white/5 text-neutral-400 text-[10px] font-black tracking-widest uppercase px-4 py-1.5 rounded-full border border-white/5">
-                                            {c.niche}
-                                        </span>
-                                        <div className="flex items-center gap-1.5 text-neutral-500 group-hover:text-white transition-colors">
-                                            <Flame className="w-4 h-4" />
-                                            <span className="text-xs font-black">{(c.views / 1000000).toFixed(1)}M</span>
-                                        </div>
-                                    </div>
-
-                                    <h3 className="text-xl font-bold leading-tight mb-8 group-hover:text-white transition-colors line-clamp-2">
-                                        {c.title}
-                                    </h3>
-
-                                    <div className="flex items-center gap-3">
+                                    Todos ({candidates.length})
+                                </button>
+                                {uniqueNiches.map(niche => {
+                                    const count = candidates.filter(c => c.niche === niche).length;
+                                    return (
                                         <button
-                                            onClick={() => handleApprove(c.id)}
-                                            disabled={approvingId === c.id}
-                                            className="flex-1 bg-white text-black font-black text-[10px] uppercase tracking-widest py-4 rounded-2xl hover:bg-neutral-200 transition-all transform active:scale-95 disabled:opacity-20 flex items-center justify-center gap-2"
+                                            key={niche}
+                                            onClick={() => setNicheFilter(niche)}
+                                            className={`px-5 py-2 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all
+                                                ${nicheFilter === niche
+                                                    ? 'bg-white text-black border-white shadow-[0_0_15px_rgba(255,255,255,0.1)]'
+                                                    : 'bg-transparent text-neutral-500 border-white/10 hover:border-white/20 hover:text-white'}`}
                                         >
-                                            {approvingId === c.id ? "SIEMBRA..." : (
-                                                <>
-                                                    <span>Procesar Ahora</span>
-                                                    <Zap className="w-3 h-3 fill-current" />
-                                                </>
-                                            )}
+                                            {niche} ({count})
                                         </button>
-                                        <a
-                                            href={c.original_url}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            className="p-4 bg-white/5 rounded-2xl border border-white/5 hover:bg-white/10 hover:border-white/20 transition-all text-neutral-600 hover:text-white"
-                                        >
-                                            <ExternalLink className="w-4 h-4" />
-                                        </a>
-                                    </div>
-                                </motion.div>
-                            ))}
-                        </AnimatePresence>
-                    </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                            <AnimatePresence mode="popLayout">
+                                {filteredCandidates.map((c) => (
+                                    <motion.div
+                                        key={c.id}
+                                        layout
+                                        initial={{ opacity: 0, y: 20 }}
+                                        animate={{ opacity: 1, y: 0 }}
+                                        exit={{ opacity: 0, scale: 0.95 }}
+                                        className="group bg-[#0a0a0a] border border-white/5 rounded-[2.5rem] p-8 hover:border-white/10 transition-all duration-500 relative overflow-hidden"
+                                    >
+                                        <div className="flex justify-between items-start mb-6">
+                                            <span className="bg-white/5 text-neutral-400 text-[10px] font-black tracking-widest uppercase px-4 py-1.5 rounded-full border border-white/5">
+                                                {c.niche}
+                                            </span>
+                                            <div className="flex items-center gap-1.5 text-neutral-500 group-hover:text-white transition-colors">
+                                                <Flame className="w-4 h-4" />
+                                                <span className="text-xs font-black">{c.views >= 1000000 ? `${(c.views / 1000000).toFixed(1)}M` : `${(c.views / 1000).toFixed(0)}K`}</span>
+                                            </div>
+                                        </div>
+
+                                        <h3 className="text-xl font-bold leading-tight mb-8 group-hover:text-white transition-colors line-clamp-2">
+                                            {c.title}
+                                        </h3>
+
+                                        <div className="flex items-center gap-3">
+                                            <button
+                                                onClick={() => handleApprove(c.id)}
+                                                disabled={approvingId === c.id}
+                                                className="flex-1 bg-white text-black font-black text-[10px] uppercase tracking-widest py-4 rounded-2xl hover:bg-neutral-200 transition-all transform active:scale-95 disabled:opacity-20 flex items-center justify-center gap-2"
+                                            >
+                                                {approvingId === c.id ? "SIEMBRA..." : (
+                                                    <>
+                                                        <span>Procesar Ahora</span>
+                                                        <Zap className="w-3 h-3 fill-current" />
+                                                    </>
+                                                )}
+                                            </button>
+                                            <a
+                                                href={c.original_url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="p-4 bg-white/5 rounded-2xl border border-white/5 hover:bg-white/10 hover:border-white/20 transition-all text-neutral-600 hover:text-white"
+                                            >
+                                                <ExternalLink className="w-4 h-4" />
+                                            </a>
+                                        </div>
+                                    </motion.div>
+                                ))}
+                            </AnimatePresence>
+                        </div>
+                    </>
                 )}
 
                 {candidates.length === 0 && !loading && (

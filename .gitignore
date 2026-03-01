@@ -68,3 +68,6 @@ Thumbs.db
 # Scripts de servicios del proyecto
 start.ps1
 stop.ps1
+
+# Migrations seeding data (contains secrets)
+migrations/seed_discovery_config.py

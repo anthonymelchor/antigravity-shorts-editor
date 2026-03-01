@@ -196,6 +196,7 @@ async def get_discovery_candidates(request: Request, niche: Optional[str] = None
     print(f"[DEBUG] Reached /api/discovery endpoint. user_id: {user_id}, niche: {niche}")
     """
     Fetches discovery candidates from Supabase. Always filtered by authenticated user.
+    Returns enriched data with scoring from the High-Intensity Discovery Engine.
     """
     headers = {
         "apikey": SUPABASE_KEY,
@@ -203,16 +204,14 @@ async def get_discovery_candidates(request: Request, niche: Optional[str] = None
         "Content-Type": "application/json"
     }
     
-    # Base URL — ALWAYS filter by authenticated user_id
-    url = f"{SUPABASE_URL}/rest/v1/discovery_results?select=*,accounts(niche)&status=eq.discovered&order=views.desc&limit=50"
+    # Base URL — ALWAYS filter by authenticated user_id, sort by discovery_score (video_score) desc
+    url = f"{SUPABASE_URL}/rest/v1/discovery_results?select=*,accounts(niche)&status=eq.discovered&order=discovery_score.desc&limit=50"
     url += f"&user_id=eq.{user_id}"
     
     if niche:
-        # Note: Supabase filtering by joined table requires specific syntax
-        # For simplicity, we filter in memory for now, or use a more precise query
-        pass
+        pass  # Filter in memory below
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         try:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
@@ -223,14 +222,27 @@ async def get_discovery_candidates(request: Request, niche: Optional[str] = None
                     current_niche = c.get('accounts', {}).get('niche', 'Unknown')
                     if niche and niche != current_niche:
                         continue
-                        
+                    
+                    # Extract enriched scoring from metadata_json
+                    meta = c.get('metadata_json', {}) or {}
+                    
                     results.append({
                         "id": c.get('id'),
                         "title": c.get('title'),
                         "original_url": c.get('original_url'),
                         "views": c.get('views'),
+                        "duration": c.get('duration'),
                         "niche": current_niche,
-                        "status": c.get('status')
+                        "status": c.get('status'),
+                        # Enriched scoring data
+                        "video_score": meta.get('video_score', c.get('discovery_score', 0)),
+                        "tension_score": meta.get('tension_score', 0),
+                        "comment_score": meta.get('comment_score', 0),
+                        "description_score": meta.get('description_score', 0),
+                        "classification": meta.get('classification', []),
+                        "comment_count": meta.get('comment_count', 0),
+                        "comment_ratio": meta.get('comment_ratio', 0),
+                        "strategic_reasoning": meta.get('strategic_reasoning', ''),
                     })
                 return results
             else:
@@ -239,6 +251,7 @@ async def get_discovery_candidates(request: Request, niche: Optional[str] = None
         except Exception as e:
             print(f"[Supabase-Exception] {e}")
             return []
+
 
 from discovery.youtube_discovery import ContentDiscoveryEngine
 
@@ -503,34 +516,34 @@ def run_pipeline(url: str, version: int):
                     
                     process.wait()
 
-                if process.returncode == 0:
-                    print(f"[END] Process {version} completed successfully.")
-                    state.status = "completed"
-                    state.progress = 100
-                    
-                    # Syncing files from projects/{version}/ to public dirs
-                    import glob
-                    proj_dir = find_project_dir(version)
-                    
-                    T_OUT = os.path.join(proj_dir, "transcript.json")
-                    if os.path.exists(T_OUT):
-                        shutil.copy(T_OUT, os.path.join(PUBLIC_DIR, f"transcript_{version}.json"))
-                    
-                    # Sync clips from projects/{version}/clips/ to public dirs
-                    if os.path.isdir(clips_dir):
-                        for f in os.listdir(clips_dir):
-                            src = os.path.join(clips_dir, f)
-                            if os.path.isfile(src):
-                                shutil.copy(src, os.path.join(PUBLIC_DIR, f))
-                                shutil.copy(src, os.path.join(REMOTION_DIR, "public", f))
-                else:
-                    state.status = "failed"
-                    state.message = "Error en el pipeline"
-                    try:
-                        with open(log_filename, "r", encoding="utf-8") as lf:
-                            err_lines = lf.readlines()
-                            state.error = err_lines[-1] if err_lines else "Unknown error"
-                    except: pass
+                    if process.returncode == 0:
+                        print(f"[END] Process {version} completed successfully.")
+                        state.status = "completed"
+                        state.progress = 100
+                        
+                        # Syncing files from projects/{version}/ to public dirs
+                        proj_dir = find_project_dir(version)
+                        clips_dir = os.path.join(proj_dir, "clips")
+                        
+                        T_OUT = os.path.join(proj_dir, "transcript.json")
+                        if os.path.exists(T_OUT):
+                            shutil.copy(T_OUT, os.path.join(PUBLIC_DIR, f"transcript_{version}.json"))
+                        
+                        # Sync clips from projects/{version}/clips/ to public dirs
+                        if os.path.isdir(clips_dir):
+                            for f in os.listdir(clips_dir):
+                                src = os.path.join(clips_dir, f)
+                                if os.path.isfile(src):
+                                    shutil.copy(src, os.path.join(PUBLIC_DIR, f))
+                                    shutil.copy(src, os.path.join(REMOTION_DIR, "public", f))
+                    else:
+                        state.status = "failed"
+                        state.message = "Error en el pipeline"
+                        try:
+                            with open(log_filename, "r", encoding="utf-8") as lf:
+                                err_lines = lf.readlines()
+                                state.error = err_lines[-1] if err_lines else "Unknown error"
+                        except: pass
 
             except Exception as e:
                 state.status = "failed"
