@@ -61,6 +61,21 @@ export default function Home() {
 
     const router = useRouter();
     const supabase = createClientComponentClient();
+    const [authToken, setAuthToken] = useState<string | null>(null);
+
+    useEffect(() => {
+        supabase.auth.getSession().then(({ data: { session } }) => {
+            if (session?.access_token) {
+                setAuthToken(session.access_token);
+            }
+        });
+        const {
+            data: { subscription },
+        } = supabase.auth.onAuthStateChange((_event, session) => {
+            setAuthToken(session?.access_token ?? null);
+        });
+        return () => subscription.unsubscribe();
+    }, [supabase]);
 
     // Authenticated fetch helper — sends Supabase JWT token on every API call
     const authFetch = async (url: string, options: RequestInit = {}): Promise<Response> => {
@@ -408,7 +423,10 @@ export default function Home() {
                                                     inputProps={{
                                                         transcript: { ...transcript, ...clip },
                                                         isPlayer: true,
-                                                        preferredLanguage
+                                                        preferredLanguage,
+                                                        apiBase: API_BASE,
+                                                        version: transcript?.version,
+                                                        token: authToken
                                                     }}
                                                 />
                                             </div>
@@ -693,7 +711,10 @@ export default function Home() {
                                 inputProps={{
                                     transcript: { ...transcript, ...transcript?.clips?.[selectedClipIdx] },
                                     isPlayer: true,
-                                    preferredLanguage
+                                    preferredLanguage,
+                                    apiBase: API_BASE,
+                                    version: transcript?.version,
+                                    token: authToken
                                 }}
                             />
                         </div>

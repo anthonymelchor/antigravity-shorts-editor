@@ -65,3 +65,6 @@ ENV/
 Thumbs.db
 *.part
 
+# Scripts de servicios del proyecto
+start.ps1
+stop.ps1

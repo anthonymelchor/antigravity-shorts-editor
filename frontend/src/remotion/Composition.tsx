@@ -37,7 +37,10 @@ interface MainProps {
     transcript?: Transcript;
     videoSrcOverride?: string;
     isPlayer?: boolean;
-    preferredLanguage?: 'en' | 'es'; // Added prop
+    preferredLanguage?: 'en' | 'es';
+    apiBase?: string;
+    version?: string;
+    token?: string | null;
 }
 
 const defaultTranscript: Transcript = transcriptData as unknown as Transcript;
@@ -46,7 +49,10 @@ export const Main: React.FC<MainProps> = ({
     transcript: propTranscript,
     videoSrcOverride,
     isPlayer = false,
-    preferredLanguage = 'en'
+    preferredLanguage = 'en',
+    apiBase,
+    version,
+    token
 }) => {
 
     const { fps } = useVideoConfig();
@@ -111,14 +117,22 @@ export const Main: React.FC<MainProps> = ({
     // Vertical offset - keep it at 0 to respect the original camera framing
     const verticalOffset = 0;
 
-    const videoUrl = transcript.video_url?.startsWith('http')
-        ? transcript.video_url
-        : (transcript.video_url ? staticFile(transcript.video_url) : staticFile('output_vertical_clip.mp4'));
+    const buildUrl = (filename: string | undefined, defaultFile: string) => {
+        if (!filename) return staticFile(defaultFile);
+        if (filename.startsWith('http')) return filename;
+        if (apiBase && version && isPlayer) {
+            let url = `${apiBase}/api/media/${version}/${filename}`;
+            if (token) url += `?token=${encodeURIComponent(token)}`;
+            return url;
+        }
+        return staticFile(filename);
+    };
+
+    const videoUrl = buildUrl(transcript.video_url, 'output_vertical_clip.mp4');
     const videoSrc = videoSrcOverride || videoUrl;
 
-    const audioSrc = transcript.audio_url?.startsWith('http')
-        ? transcript.audio_url
-        : (transcript.audio_url ? staticFile(transcript.audio_url) : staticFile('output_vertical_clip.wav'));
+    const audioUrl = buildUrl(transcript.audio_url, 'output_vertical_clip.wav');
+    const audioSrc = audioUrl;
 
     const renderVideoLayer = (c: number, yOffset: number) => {
         const leftValue = calculateVideoTranslation(c);

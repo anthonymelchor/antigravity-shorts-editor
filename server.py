@@ -130,10 +130,15 @@ AUTH_CACHE_TTL = 300  # 5 minutes
 async def get_current_user(request: Request) -> str:
     """Validate Supabase JWT and extract user_id. Results are cached."""
     auth_header = request.headers.get("authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authentication required. Send Bearer token.")
+    token = ""
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    else:
+        token = request.query_params.get("token", "")
+        
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required. Send Bearer token or ?token= param.")
     
-    token = auth_header[7:]  # Remove 'Bearer ' prefix
     token_key = hash(token)  # Use hash for cache key (don't store raw tokens)
     
     # Check cache first (fast path)
@@ -505,8 +510,7 @@ def run_pipeline(url: str, version: int):
                     
                     # Syncing files from projects/{version}/ to public dirs
                     import glob
-                    proj_dir = find_project_dir(version) or os.path.join(PROJECTS_DIR, str(version))
-                    clips_dir = os.path.join(proj_dir, "clips")
+                    proj_dir = find_project_dir(version)
                     
                     T_OUT = os.path.join(proj_dir, "transcript.json")
                     if os.path.exists(T_OUT):
@@ -629,6 +633,42 @@ async def reset_project(request: Request):
             except: continue
             
     return {"message": "User projects wiped", "files_removed": deleted_count}
+
+
+@app.get("/api/media/{version}/{filename}")
+async def serve_media(version: str, filename: str, request: Request):
+    """Professional Media Serving with User Isolation and Range support."""
+    user_id = await get_current_user(request)
+    
+    proj_dir = find_project_dir(version)
+    if not proj_dir:
+        raise HTTPException(status_code=404, detail="Project folder not found")
+        
+    # Verify ownership via transcript.json
+    t_path = os.path.join(proj_dir, "transcript.json")
+    if os.path.exists(t_path):
+        try:
+            with open(t_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if data.get("user_id") and data.get("user_id") != user_id:
+                    raise HTTPException(status_code=403, detail="Unauthorized access to this media")
+        except: pass
+    
+    # Locate the file in project structure
+    # 1. Check in root of project (input.mp4, proxy.mp4)
+    file_path = os.path.join(proj_dir, filename)
+    if not os.path.exists(file_path):
+        # 2. Check in clips/ (video_clip_1.mp4, etc)
+        file_path = os.path.join(proj_dir, "clips", filename)
+    if not os.path.exists(file_path):
+        # 3. Check in renders/ (out_clip_1.mp4, etc)
+        file_path = os.path.join(proj_dir, "renders", filename)
+        
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"Media file {filename} not found in project {version}")
+        
+    # FileResponse automatically handles Range requests for video seeking/streaming
+    return FileResponse(file_path)
 
 @app.get("/api/projects")
 async def list_projects(request: Request):
@@ -777,13 +817,15 @@ async def get_status(request: Request, version: Optional[str] = None):
 async def get_transcript_version(version: str, request: Request):
     user_id = await get_current_user(request)
     
-    path = os.path.join(BASE_DIR, f"transcript_{version}.json")
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if data.get("user_id") and data.get("user_id") != user_id:
-                raise HTTPException(status_code=403, detail="Unauthorized: this project belongs to another user")
-            return data
+    proj_dir = find_project_dir(version)
+    if proj_dir:
+        path = os.path.join(proj_dir, "transcript.json")
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if data.get("user_id") and data.get("user_id") != user_id:
+                    raise HTTPException(status_code=403, detail="Unauthorized: this project belongs to another user")
+                return data
     return {"error": "Transcript not found"}
 
 # REMOVED: Global /api/transcript endpoint (security risk)
@@ -810,8 +852,16 @@ def do_render_queue(version_id, clip_indices):
                 log_file.write(f"[RENDER] --- Processing Clip #{idx+1} ---\n")
                 log_file.flush()
                 
-                # Use version-specific transcript
-                t_path = os.path.join(BASE_DIR, f"transcript_{version_id}.json")
+                # Use version-specific transcript from projects dir
+                proj_dir = find_project_dir(version_id)
+                if not proj_dir:
+                    msg = f"Project directory for {version_id} not found."
+                    render_state.status = "failed"
+                    render_state.error = msg
+                    log_file.write(f"[RENDER] ERROR: {msg}\n")
+                    continue
+                    
+                t_path = os.path.join(proj_dir, "transcript.json")
                 if not os.path.exists(t_path):
                     msg = f"Original transcript {t_path} not found."
                     render_state.status = "failed"
@@ -843,7 +893,8 @@ def do_render_queue(version_id, clip_indices):
                 v_name = data.get("video_url")
                 a_name = data.get("audio_url")
 
-                if not v_name or not os.path.exists(os.path.join(BASE_DIR, v_name)):
+                v_path = os.path.join(proj_dir, "clips", v_name) if v_name and v_name.startswith("video") else os.path.join(proj_dir, v_name)
+                if not v_name or not os.path.exists(v_path):
                     msg = f"Video file {v_name} not found."
                     render_state.status = "failed"
                     render_state.error = msg
@@ -856,9 +907,10 @@ def do_render_queue(version_id, clip_indices):
                 
                 # 2. Media to Remotion public
                 remotion_public = os.path.join(REMOTION_DIR, "public")
-                shutil.copy(os.path.join(BASE_DIR, v_name), os.path.join(remotion_public, v_name))
-                if a_name and os.path.exists(os.path.join(BASE_DIR, a_name)):
-                    shutil.copy(os.path.join(BASE_DIR, a_name), os.path.join(remotion_public, a_name))
+                shutil.copy(v_path, os.path.join(remotion_public, v_name))
+                a_path = os.path.join(proj_dir, "clips", a_name) if a_name and a_name.startswith("audio") else os.path.join(proj_dir, a_name)
+                if a_name and os.path.exists(a_path):
+                    shutil.copy(a_path, os.path.join(remotion_public, a_name))
                 
                 render_state.message = f"Building Clip #{idx+1}..."
                 render_state.progress = 20
