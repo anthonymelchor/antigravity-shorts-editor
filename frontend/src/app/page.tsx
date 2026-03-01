@@ -62,22 +62,36 @@ export default function Home() {
     const router = useRouter();
     const supabase = createClientComponentClient();
 
+    // Authenticated fetch helper — sends Supabase JWT token on every API call
+    const authFetch = async (url: string, options: RequestInit = {}): Promise<Response> => {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session?.access_token) {
+            router.push('/login');
+            throw new Error('Not authenticated');
+        }
+        return fetch(url, {
+            ...options,
+            headers: {
+                ...(options.headers || {}),
+                'Authorization': `Bearer ${session.access_token}`,
+            },
+        });
+    };
+
     useEffect(() => {
         fetchProjects();
     }, []);
 
     const fetchProjects = async () => {
         try {
-            const { data: { session } } = await supabase.auth.getSession();
-            const userId = session?.user?.id;
-            const res = await fetch(`${API_BASE}/api/projects${userId ? `?user_id=${userId}` : ''}`);
+            const res = await authFetch(`${API_BASE}/api/projects`);
             const data = await res.json();
             if (Array.isArray(data)) {
                 const failedProj = data.find(p => p.status === 'failed');
                 if (failedProj && !pendingDeletions.current.has(failedProj.version)) {
                     setAlert({ msg: "Hubo un inconveniente, intenta de nuevo en unos minutos.", type: 'error' });
                     pendingDeletions.current.add(failedProj.version);
-                    fetch(`${API_BASE}/api/project/${failedProj.version}`, { method: 'DELETE' });
+                    authFetch(`${API_BASE}/api/project/${failedProj.version}`, { method: 'DELETE' });
                 }
 
                 if (versionRef.current && data.find(p => String(p.version) === String(versionRef.current))) {
@@ -104,14 +118,8 @@ export default function Home() {
     }, []);
 
     const checkInitialStatus = async () => {
-        try {
-            const transRes = await fetch(`${API_BASE}/api/transcript`);
-            const transData = await transRes.json();
-            if (transData && !transData.error) {
-                setTranscript(transData);
-                setStatus(prev => ({ ...prev, status: 'completed', progress: 100 }));
-            }
-        } catch (err) { console.log("Empty project"); }
+        // SECURITY: No longer loads global transcript. Projects are loaded explicitly via loadProject().
+        // This function now only checks for an active processing state.
     };
 
     useEffect(() => {
@@ -126,9 +134,7 @@ export default function Home() {
         if (status.status !== 'idle' && status.status !== 'completed' && status.status !== 'failed') {
             interval = setInterval(async () => {
                 try {
-                    const { data: { session } } = await supabase.auth.getSession();
-                    const userId = session?.user?.id;
-                    const res = await fetch(`${API_BASE}/api/status?user_id=${userId || ''}${status.version ? `&version=${status.version}` : ''}`);
+                    const res = await authFetch(`${API_BASE}/api/status${status.version ? `?version=${status.version}` : ''}`);
                     const data = await res.json();
                     setStatus(data);
 
@@ -158,7 +164,6 @@ export default function Home() {
         if (!url.trim()) return;
 
         const { data: { session } } = await supabase.auth.getSession();
-        const userId = session?.user?.id;
 
         const alreadyProcessing = projects.find(p => p.isActive && p.url === url.trim());
         if (alreadyProcessing) {
@@ -176,9 +181,9 @@ export default function Home() {
             setStatus({ status: 'processing', progress: 0, message: 'Waking up engine...', error: null, version: null });
             setTranscript(null);
 
-            const res = await fetch(`${API_BASE}/api/process`, {
+            const res = await authFetch(`${API_BASE}/api/process`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url: url.trim(), user_id: userId })
+                body: JSON.stringify({ url: url.trim() })
             });
             const data = await res.json();
 
@@ -203,9 +208,7 @@ export default function Home() {
     const handleReset = async () => {
         if (!confirm("CONFIRMAR: ¿Deseas eliminar únicamente TUS proyectos activos de la lista?")) return;
         try {
-            const { data: { session } } = await supabase.auth.getSession();
-            const userId = session?.user?.id;
-            await fetch(`${API_BASE}/api/reset?user_id=${userId || ''}`, { method: 'POST' });
+            await authFetch(`${API_BASE}/api/reset`, { method: 'POST' });
             setTranscript(null); setUrl('');
             setStatus({ status: 'idle', progress: 0, message: 'Project Cleared', error: null, version: null });
             setView('dashboard');
@@ -215,9 +218,7 @@ export default function Home() {
 
     const handleDeleteProject = async (version: string) => {
         try {
-            const { data: { session } } = await supabase.auth.getSession();
-            const userId = session?.user?.id;
-            await fetch(`${API_BASE}/api/project/${version}?user_id=${userId || ''}`, { method: 'DELETE' });
+            await authFetch(`${API_BASE}/api/project/${version}`, { method: 'DELETE' });
             setShowDeleteModal(null);
             fetchProjects();
             if (transcript?.version === version) {
@@ -229,9 +230,7 @@ export default function Home() {
 
     const loadProject = async (version: string) => {
         try {
-            const { data: { session } } = await supabase.auth.getSession();
-            const userId = session?.user?.id;
-            const res = await fetch(`${API_BASE}/api/transcript/${version}?user_id=${userId || ''}`);
+            const res = await authFetch(`${API_BASE}/api/transcript/${version}`);
             const data = await res.json();
             if (data && !data.error) {
                 setTranscript(data);
@@ -255,18 +254,15 @@ export default function Home() {
     };
 
     const saveChangesDebounced = async (currentTranscript: any) => {
-        // Simple immediate save for now, could be debounced
         try {
-            const { data: { session } } = await supabase.auth.getSession();
-            const userId = session?.user?.id;
-            if (!userId || !currentTranscript?.version) return;
+            if (!currentTranscript?.version) return;
 
-            await fetch(`${API_BASE}/api/update-framing`, {
+            await authFetch(`${API_BASE}/api/update-framing`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     version: currentTranscript.version,
-                    user_id: userId,
+                    user_id: '',  // Server extracts from token now
                     center: currentTranscript.center,
                     layout: currentTranscript.layout,
                     framing_segments: currentTranscript.framing_segments
@@ -290,17 +286,15 @@ export default function Home() {
 
         try {
             setAlert({ msg: `Rendering ${indicesToRender.length} clip(s)...`, type: 'warning' });
-            const { data: { session } } = await supabase.auth.getSession();
-            const userId = session?.user?.id;
 
-            const res = await fetch(`${API_BASE}/api/render`, {
+            const res = await authFetch(`${API_BASE}/api/render`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
                     version: transcript.version,
-                    user_id: userId,
+                    user_id: '',  // Server extracts from token now
                     indices: indicesToRender
                 })
             });

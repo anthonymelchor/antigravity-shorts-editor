@@ -8,16 +8,13 @@ remotion-app/out/
 remotion-app/out.mp4
 out.mp4
 
-# Media and Data (Generated)
+# Projects (user-generated media organized per-project)
+projects/
+
+# Media and Data (Generated — legacy, should not exist in root anymore)
 *.mp4
 *.wav
 *.mp3
-video_*.mp4
-audio_*.wav
-temp_video.mp4
-input_full.mp4
-output_vertical_clip.mp4
-framing_proxy.mp4
 
 # Images (Diagnostics and dynamic assets)
 *.jpg
@@ -35,7 +32,6 @@ framing_proxy.mp4
 !next.config.ts
 !remotion.config.ts
 !eslint.config.mjs
-!transcript_data.json.example
 
 # Exception: Allow original source transcript if you want to keep a template
 # but ignore the actual working data
@@ -68,3 +64,4 @@ ENV/
 .DS_Store
 Thumbs.db
 *.part
+

@@ -23,6 +23,22 @@ export default function DiscoveryPage() {
     const [loading, setLoading] = useState(true);
     const [approvingId, setApprovingId] = useState<number | null>(null);
 
+    // Authenticated fetch helper
+    const authFetch = async (url: string, options: RequestInit = {}): Promise<Response> => {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session?.access_token) {
+            window.location.href = '/login';
+            throw new Error('Not authenticated');
+        }
+        return fetch(url, {
+            ...options,
+            headers: {
+                ...(options.headers || {}),
+                'Authorization': `Bearer ${session.access_token}`,
+            },
+        });
+    };
+
     const [nicheLimit, setNicheLimit] = useState(5);
     const [isDiscovering, setIsDiscovering] = useState(false);
     const [discoveryStatus, setDiscoveryStatus] = useState<any>(null);
@@ -34,8 +50,8 @@ export default function DiscoveryPage() {
             interval = setInterval(async () => {
                 try {
                     const { data: { session } } = await supabase.auth.getSession();
-                    const userId = session?.user?.id;
-                    const res = await fetch(`${API_BASE}/api/status?version=discovery_${userId || 'global'}&user_id=${userId || ''}`);
+                    const uid = session?.user?.id;
+                    const res = await authFetch(`${API_BASE}/api/status?version=discovery_${uid || 'global'}`);
                     const data = await res.json();
 
                     if (data.status) {
@@ -67,8 +83,8 @@ export default function DiscoveryPage() {
     const checkInitialStatus = async () => {
         try {
             const { data: { session } } = await supabase.auth.getSession();
-            const userId = session?.user?.id;
-            const res = await fetch(`${API_BASE}/api/status?version=discovery_${userId || 'global'}&user_id=${userId || ''}`);
+            const uid = session?.user?.id;
+            const res = await authFetch(`${API_BASE}/api/status?version=discovery_${uid || 'global'}`);
             const data = await res.json();
             if (data.status === 'processing') {
                 setIsDiscovering(true);
@@ -80,10 +96,7 @@ export default function DiscoveryPage() {
     const fetchCandidates = async () => {
         try {
             setLoading(true);
-            const { data: { session } } = await supabase.auth.getSession();
-            const userId = session?.user?.id;
-
-            const resp = await fetch(`${API_BASE}/api/discovery${userId ? `?user_id=${userId}` : ''}`);
+            const resp = await authFetch(`${API_BASE}/api/discovery`);
             const data = await resp.json();
             setCandidates(data);
         } catch (err) {
@@ -104,10 +117,7 @@ export default function DiscoveryPage() {
         });
         setAlert(null);
         try {
-            const { data: { session } } = await supabase.auth.getSession();
-            const userId = session?.user?.id;
-
-            const res = await fetch(`${API_BASE}/api/discovery/run?limit=${nicheLimit}${userId ? `&user_id=${userId}` : ''}`, { method: 'POST' });
+            const res = await authFetch(`${API_BASE}/api/discovery/run?limit=${nicheLimit}`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json();
                 setAlert({ msg: data.detail || 'Error starting discovery', type: 'error' });
@@ -128,22 +138,18 @@ export default function DiscoveryPage() {
 
         setApprovingId(id);
         try {
-            const { data: { session } } = await supabase.auth.getSession();
-            const userId = session?.user?.id;
-
-            // 1. Mark as approved in DB
-            const resp = await fetch(`${API_BASE}/api/discovery/approve/${id}`, {
+            // 1. Mark as approved in DB (with auth)
+            const resp = await authFetch(`${API_BASE}/api/discovery/approve/${id}`, {
                 method: "POST",
             });
 
             if (resp.ok) {
-                // 2. Trigger the actual video pipeline with user_id context
-                await fetch(`${API_BASE}/api/process`, {
+                // 2. Trigger the actual video pipeline
+                await authFetch(`${API_BASE}/api/process`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        url: candidate.original_url,
-                        user_id: userId
+                        url: candidate.original_url
                     })
                 });
 

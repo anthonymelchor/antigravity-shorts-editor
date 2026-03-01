@@ -13,7 +13,8 @@ load_dotenv()
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY") # Service Role Key
-ADMIN_USER_ID = "22dff9c7-9760-4df0-b72c-72d034233576" # Default Admin
+# SECURITY: Removed hardcoded ADMIN_USER_ID fallback
+# All discovery results MUST have a valid user_id from their account
 
 class ContentDiscoveryEngine:
     """
@@ -127,9 +128,15 @@ class ContentDiscoveryEngine:
         self._log("END", f"Added {new_count} candidates for {account['name']}.", 100)
 
     def _save_candidate(self, account, entry, views, duration):
+        # SECURITY: Require user_id — skip accounts without one
+        user_id = account.get("user_id")
+        if not user_id:
+            self._log("WARNING", f"Skipping candidate save: account {account['id']} has no user_id")
+            return
+        
         url = f"{SUPABASE_URL}/rest/v1/discovery_results"
         payload = {
-            "user_id": account.get("user_id", ADMIN_USER_ID),
+            "user_id": user_id,
             "account_id": account["id"],
             "title": entry.get('title'),
             "original_url": entry.get('webpage_url') or entry.get('url'),

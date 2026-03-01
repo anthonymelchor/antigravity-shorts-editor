@@ -2,6 +2,7 @@ import os
 import subprocess
 import json
 import time
+import re
 import requests
 import logging
 import yt_dlp
@@ -42,7 +43,8 @@ def download_video(url, output_path):
     logger.info(f"Downloading video from {url}...")
     try:
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'format': 'bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440]+bestaudio/best[height<=1440]',
+            'merge_output_format': 'mp4',
             'outtmpl': output_path,
             'overwrites': True,
         }
@@ -60,7 +62,7 @@ def transcribe_audio(video_path, model_size="base"):
         # Run on CPU with INT8 representation for lower memory usage.
         model = WhisperModel(model_size, device="cpu", compute_type="int8")
 
-        segments, info = model.transcribe(video_path, beam_size=5, word_timestamps=True)
+        segments, info = model.transcribe(video_path, beam_size=1, word_timestamps=True, vad_filter=True)
 
         logger.info(f"Detected language '{info.language}' with probability {info.language_probability}")
 
@@ -163,11 +165,11 @@ def translate_full_transcript_global(segments_data):
         
         translated_texts = []
         max_retries = 3
-        current_delay = 5
+        current_delay = 1
         
         for attempt in range(max_retries):
             try:
-                # For batches this large, we allow more time but fewer calls
+                # Brief pause to avoid rate limits
                 time.sleep(current_delay) 
                 response = client.models.generate_content(
                     model='gemini-2.5-flash',
@@ -232,7 +234,7 @@ def analyze_with_gemini(transcript):
 
     prompt = f"""
     Act as a Senior Viral Behavioral Engineer and Video Editor (OpusClip/Hormozi style) specialized in 2026 engagement patterns.
-    Identify the TOP 10 most viral independent segments (25-60s) from the transcript. 
+    Identify the TOP 10 most viral independent segments (35-70s) from the transcript. 
     It is CRITICAL to prioritize segments that justify the user's time investment instantly.
 
     VIRAL PRINCIPLES (ECOSYSTEM 2026):
@@ -286,7 +288,7 @@ def analyze_with_gemini(transcript):
     {json.dumps(transcript['words'][:1500])}
     """
 
-    time.sleep(5)  # Pause to avoid 429 rate limit
+    time.sleep(1)  # Brief pause to avoid 429 rate limit
     response = None
     try:
         response = client.models.generate_content(
@@ -699,6 +701,21 @@ def process_video_ffmpeg(input_path, output_path, start_time, end_time, audio_pa
         logger.error(f"FFmpeg processing failed: {str(e)}")
         raise e
 
+
+def slugify(text, max_length=60):
+    """Convert text to a clean folder name."""
+    import unicodedata
+    if not text:
+        return "untitled"
+    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9]+', '_', text)
+    text = text.strip('_')
+    text = re.sub(r'_+', '_', text)
+    if len(text) > max_length:
+        text = text[:max_length].rsplit('_', 1)[0]
+    return text or "untitled"
+
 if __name__ == "__main__":
     import sys
     import traceback
@@ -709,18 +726,28 @@ if __name__ == "__main__":
     parser.add_argument("--url", help="YouTube URL to process")
     parser.add_argument("--version", help="Version identifier (timestamp)")
     parser.add_argument("--user_id", help="User ID owner of this process")
+    parser.add_argument("--title", help="Video title for folder naming")
     
     args = parser.parse_known_args()[0]
     
     youtube_url = args.url
     version = args.version or str(int(time.time()))
     user_id = args.user_id
+    title = args.title
 
-    # Define working filenames for this run
-    INPUT_FILE = f"input_{version}.mp4"
-    VIDEO_OUT = f"video_{version}.mp4"
-    AUDIO_OUT = f"audio_{version}.wav"
-    TRANSCRIPT_FILE = f"transcript_{version}.json"
+    # Define project directory structure with readable folder name
+    folder_name = f"{slugify(title)}_{version}" if title else version
+    PROJECT_DIR = os.path.join(os.getcwd(), "projects", folder_name)
+    CLIPS_DIR = os.path.join(PROJECT_DIR, "clips")
+    RENDERS_DIR = os.path.join(PROJECT_DIR, "renders")
+    os.makedirs(CLIPS_DIR, exist_ok=True)
+    os.makedirs(RENDERS_DIR, exist_ok=True)
+    
+    # Define working filenames for this run (organized in project folder)
+    INPUT_FILE = os.path.join(PROJECT_DIR, "input.mp4")
+    VIDEO_OUT = os.path.join(PROJECT_DIR, f"video_{version}.mp4")  # legacy, not directly used
+    AUDIO_OUT = os.path.join(PROJECT_DIR, f"audio_{version}.wav")   # legacy, not directly used
+    TRANSCRIPT_FILE = os.path.join(PROJECT_DIR, "transcript.json")
 
     try:
         # 1. Download (Always download if URL provided)
@@ -733,6 +760,19 @@ if __name__ == "__main__":
             # Fallback default
             youtube_url = "https://www.youtube.com/watch?v=okL1xL_hHOw"
             video_file = download_video(youtube_url, INPUT_FILE)
+        
+        # 1.5 Create lightweight proxy for framing analysis (ONE time)
+        PROXY_FILE = os.path.join(PROJECT_DIR, "proxy.mp4")
+        logger.info(f"Creating 480p proxy for framing analysis...")
+        proxy_cmd = [
+            "ffmpeg", "-y", "-i", video_file,
+            "-vf", "scale=-2:480",
+            "-c:v", "libx264", "-crf", "28", "-preset", "veryfast",
+            "-an",  # No audio needed for visual analysis
+            PROXY_FILE
+        ]
+        subprocess.run(proxy_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        logger.info(f"Proxy created: {PROXY_FILE}")
         
         # 2. Transcribe
         transcript = transcribe_audio(video_file)
@@ -759,8 +799,8 @@ if __name__ == "__main__":
             
             # Clip-specific filenames
             clip_id = idx + 1
-            V_OUT = f"video_{version}_clip_{clip_id}.mp4"
-            A_OUT = f"audio_{version}_clip_{clip_id}.wav"
+            V_OUT = os.path.join(CLIPS_DIR, f"video_{version}_clip_{clip_id}.mp4")
+            A_OUT = os.path.join(CLIPS_DIR, f"audio_{version}_clip_{clip_id}.wav")
             
             # 3.5 Adjust Transcript Timestamps
             start_time = float(analysis.get('start', 0.0))
@@ -782,8 +822,8 @@ if __name__ == "__main__":
                 if w['end'] > start_time and w['start'] < end_time
             ]
             
-            # 3.8 Intelligent Framing
-            framing_data = analyze_framing_high_precision_local(video_file, start_time, end_time)
+            # 3.8 Intelligent Framing (uses lightweight proxy for speed, same normalized coords)
+            framing_data = analyze_framing_high_precision_local(PROXY_FILE, start_time, end_time)
             
             # 3.85 Process B-roll Suggestions and Adjust Times
             edit_events = analysis.get("edit_events", {"zooms": [], "icons": [], "b_rolls": [], "backgrounds": []})
@@ -806,8 +846,8 @@ if __name__ == "__main__":
                 "framing_reasoning": framing_data.get("reasoning", ""),
                 "framing_segments": framing_data.get("framing_segments", []),
                 "edit_events": edit_events,
-                "video_url": V_OUT,
-                "audio_url": A_OUT
+                "video_url": os.path.basename(V_OUT),
+                "audio_url": os.path.basename(A_OUT)
             }
             
             # 4. Crop and Cut the physical clip
@@ -837,9 +877,9 @@ if __name__ == "__main__":
         
         with open(TRANSCRIPT_FILE, "w", encoding="utf-8") as f:
             json.dump(final_data, f, ensure_ascii=False, indent=2)
-            
-        with open("transcript_data.json", "w", encoding="utf-8") as f:
-            json.dump(final_data, f, ensure_ascii=False, indent=2)
+        
+        # SECURITY: Removed global transcript_data.json write.
+        # Each user's data stays isolated in transcript_{version}.json only.
 
         logger.info(f"Backend processing pipeline complete! Version: {version} (Generated {len(processed_clips)} clips)")
         # Force flush log
