@@ -4,6 +4,7 @@ import threading
 import json
 import time
 import sys
+import logging
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +16,14 @@ from dotenv import load_dotenv
 
 # Cargar .env
 load_dotenv()
+
+# Configuración de Logging para Renders
+RENDER_LOG = "render.log"
+render_logger = logging.getLogger("render_logger")
+render_logger.setLevel(logging.INFO)
+render_handler = logging.FileHandler(RENDER_LOG, encoding='utf-8')
+render_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+render_logger.addHandler(render_handler)
 
 # Debug: Verificar clave de Gemini en el servidor
 gemini_key = os.environ.get("GEMINI_API_KEY", "")
@@ -411,6 +420,7 @@ class RenderRequest(BaseModel):
     version: str
     user_id: str
     indices: List[int]
+    preferredLanguage: Optional[str] = 'es'
 
 class FramingUpdate(BaseModel):
     version: str
@@ -418,6 +428,12 @@ class FramingUpdate(BaseModel):
     center: float = None
     layout: str = None
     framing_segments: list = None
+
+class MetadataUpdate(BaseModel):
+    version: str
+    user_id: str
+    account_id: Optional[int] = None
+    is_podcast: Optional[bool] = None
 
 def run_pipeline(url: str, version: int):
     # Use localized state for this process
@@ -567,6 +583,91 @@ async def update_framing(update: FramingUpdate, request: Request):
         shutil.copy(target_path, os.path.join(REMOTION_DIR, "src", "transcript_data.json"))
         return {"status": "success"}
     return {"error": "Transcript not found"}
+
+@app.get("/api/accounts")
+async def list_accounts(request: Request):
+    """Fetch available social media accounts from Supabase."""
+    user_id = await get_current_user(request)
+    
+    url = f"{SUPABASE_URL}/rest/v1/accounts?select=id,name,niche"
+    if user_id:
+        url += f"&user_id=eq.{user_id}"
+    
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 200:
+                return resp.json()
+            else:
+                raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/update-metadata")
+async def update_metadata(update: MetadataUpdate, request: Request):
+    """Update project-wide metadata like account_id or is_podcast."""
+    user_id = await get_current_user(request)
+    
+    _proj_dir = find_project_dir(update.version)
+    target_path = os.path.join(_proj_dir, "transcript.json") if _proj_dir else None
+    if not target_path or not os.path.exists(target_path):
+        target_path = os.path.join(BASE_DIR, f"transcript_{update.version}.json")
+        
+    if not os.path.exists(target_path):
+        raise HTTPException(status_code=404, detail="Project not found")
+        
+    with open(target_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+        
+    if data.get("user_id") and data.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+        
+    if update.account_id is not None:
+        data["account_id"] = update.account_id
+    if update.is_podcast is not None:
+        data["is_podcast"] = update.is_podcast
+        
+    if update.account_id is not None:
+        try:
+            acc_url = f"{SUPABASE_URL}/rest/v1/accounts?select=name,niche&id=eq.{update.account_id}"
+            headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+            async with httpx.AsyncClient() as client:
+                acc_resp = await client.get(acc_url, headers=headers)
+                if acc_resp.status_code == 200:
+                    acc_json = acc_resp.json()
+                    if acc_json:
+                        handle = acc_json[0].get("name")
+                        niche = acc_json[0].get("niche")
+                        data["instagram_handle"] = handle
+                        data["niche_name"] = niche
+        except: pass
+
+    with open(target_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    # Sync to all consumers
+    # 1. Rendering Engine
+    shutil.copy(target_path, os.path.join(REMOTION_DIR, "src", "transcript_data.json"))
+    # 2. Frontend Live Preview (Neural Preview Engine)
+    shutil.copy(target_path, os.path.join(BASE_DIR, "frontend", "src", "remotion", "transcript_data.json"))
+    # 3. Public Download Asset
+    shutil.copy(target_path, os.path.join(PUBLIC_DIR, f"transcript_{update.version}.json"))
+    
+    return {
+        "status": "success", 
+        "data": {
+            "account_id": data.get("account_id"), 
+            "is_podcast": data.get("is_podcast"),
+            "instagram_handle": handle,
+            "niche_name": niche
+        }
+    }
 
 @app.post("/api/process")
 async def process_video(process_req: ProcessRequest, request: Request, background_tasks: BackgroundTasks):
@@ -815,22 +916,54 @@ async def get_status(request: Request, version: Optional[str] = None):
 async def get_transcript_version(version: str, request: Request):
     user_id = await get_current_user(request)
     
-    proj_dir = find_project_dir(version)
-    if proj_dir:
-        path = os.path.join(proj_dir, "transcript.json")
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if data.get("user_id") and data.get("user_id") != user_id:
-                    raise HTTPException(status_code=403, detail="Unauthorized: this project belongs to another user")
-                return data
-    return {"error": "Transcript not found"}
+    _proj_dir = find_project_dir(version)
+    target_path = os.path.join(_proj_dir, "transcript.json") if _proj_dir else None
+    if not target_path or not os.path.exists(target_path):
+        target_path = os.path.join(BASE_DIR, f"transcript_{version}.json")
+        
+    if os.path.exists(target_path):
+        with open(target_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            
+        if data.get("user_id") and data.get("user_id") != user_id:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+            
+        # Enrich with account handle and niche name if account_id exists
+        account_id = data.get("account_id")
+        if account_id:
+            try:
+                # Fetch handle and niche dynamically from DB
+                acc_url = f"{SUPABASE_URL}/rest/v1/accounts?select=name,niche&id=eq.{account_id}"
+                headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+                async with httpx.AsyncClient() as client:
+                    acc_resp = await client.get(acc_url, headers=headers)
+                    if acc_resp.status_code == 200:
+                        acc_data = acc_resp.json()
+                        if acc_data:
+                            data["instagram_handle"] = acc_data[0].get("name")
+                            data["niche_name"] = acc_data[0].get("niche")
+                            
+                            # PERSIST back to disk so Remotion sees it next time
+                            with open(target_path, "w", encoding="utf-8") as f:
+                                json.dump(data, f, ensure_ascii=False, indent=2)
+                                
+                            # Sync to all consumers for immediate consistency
+                            shutil.copy(target_path, os.path.join(REMOTION_DIR, "src", "transcript_data.json"))
+                            shutil.copy(target_path, os.path.join(BASE_DIR, "frontend", "src", "remotion", "transcript_data.json"))
+                            
+            except Exception as e:
+                print(f"[ERROR] Failed to fetch account handle/niche: {e}")
+
+        return data
+    raise HTTPException(status_code=404, detail="Transcript not found")
 
 # REMOVED: Global /api/transcript endpoint (security risk)
 # All transcript access now requires version + auth
 
-def do_render_queue(version_id, clip_indices):
+def do_render_queue(version_id, clip_indices, preferredLanguage='es'):
     log_file_path = os.path.join(BASE_DIR, f"pipeline_{version_id}.log")
+    
+    render_logger.info(f"START BATCH RENDER: Version {version_id}, Clips {clip_indices}, Lang {preferredLanguage}")
     
     with open(log_file_path, "a", encoding="utf-8") as log_file:
         log_file.write(f"\n\n[RENDER] Starting Batch Render for version {version_id}. Indices: {clip_indices}\n")
@@ -849,6 +982,7 @@ def do_render_queue(version_id, clip_indices):
                 
                 log_file.write(f"[RENDER] --- Processing Clip #{idx+1} ---\n")
                 log_file.flush()
+                render_logger.info(f"Clip {idx+1}/{len(clip_indices)} start for version {version_id}...")
                 
                 # Use version-specific transcript from projects dir
                 proj_dir = find_project_dir(version_id)
@@ -868,12 +1002,28 @@ def do_render_queue(version_id, clip_indices):
                     continue
 
                 with open(t_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                    manifest = json.load(f) # Renamed 'data' to 'manifest' for clarity
                 
+                # Prepare clip_data for Remotion
+                clip_data = {
+                    "words": [],
+                    "words_es": [],
+                    "video_url": None,
+                    "audio_url": None,
+                    "edit_events": {},
+                    "duration": 30,
+                    "layout": "single",
+                    "center": 0.5,
+                    "center_top": 0.5,
+                    "center_bottom": 0.5,
+                    "framing_segments": [],
+                    "preferredLanguage": preferredLanguage
+                }
+
                 # If clip_index is provided, override root fields for Remotion parity
-                if "clips" in data and idx < len(data["clips"]):
-                    clip = data["clips"][idx]
-                    data.update({
+                if "clips" in manifest and idx < len(manifest["clips"]):
+                    clip = manifest["clips"][idx]
+                    clip_data.update({
                         "words": clip.get("words", []),
                         "words_es": clip.get("words_es", []),
                         "video_url": clip.get("video_url"),
@@ -884,12 +1034,30 @@ def do_render_queue(version_id, clip_indices):
                         "center": clip.get("center", 0.5),
                         "center_top": clip.get("center_top", 0.5),
                         "center_bottom": clip.get("center_bottom", 0.5),
-                        "framing_segments": clip.get("framing_segments", [])
+                        "framing_segments": clip.get("framing_segments", []),
                     })
                     log_file.write(f"[RENDER] Clip fields updated from index {idx}\n")
                 
-                v_name = data.get("video_url")
-                a_name = data.get("audio_url")
+                # Enrich clip_data with real branding handle and niche if account_id is present
+                account_id = manifest.get("account_id")
+                if account_id:
+                    try:
+                        acc_url = f"{SUPABASE_URL}/rest/v1/accounts?select=name,niche&id=eq.{account_id}"
+                        headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+                        acc_resp = httpx.get(acc_url, headers=headers)
+                        if acc_resp.status_code == 200:
+                            acc_data = acc_resp.json()
+                            if acc_data:
+                                clip_data["instagram_handle"] = acc_data[0].get("name")
+                                clip_data["niche_name"] = acc_data[0].get("niche")
+                    except: pass
+
+                # 1. Save modified Transcript to Remotion src
+                with open(os.path.join(REMOTION_DIR, "src", "transcript_data.json"), "w", encoding="utf-8") as f:
+                    json.dump(clip_data, f, ensure_ascii=False, indent=2)
+                
+                v_name = clip_data.get("video_url")
+                a_name = clip_data.get("audio_url")
 
                 v_path = os.path.join(proj_dir, "clips", v_name) if v_name and v_name.startswith("video") else os.path.join(proj_dir, v_name)
                 if not v_name or not os.path.exists(v_path):
@@ -945,6 +1113,7 @@ def do_render_queue(version_id, clip_indices):
                     render_state.message = f"Clip #{idx+1} Ready!"
                     render_state.progress = 100
                     log_file.write(f"[RENDER] SUCCESS: Clip #{idx+1} completed.\n")
+                    render_logger.info(f"Clip {idx+1} SUCCESS for version {version_id}")
                     
                     final_out = os.path.join(REMOTION_DIR, "out.mp4")
                     if os.path.exists(final_out):
@@ -961,12 +1130,15 @@ def do_render_queue(version_id, clip_indices):
                     render_state.status = "failed"
                     render_state.message = f"Failed Clip #{idx+1}"
                     log_file.write(f"[RENDER] ERROR: Remotion build failed (Exit Code {process.returncode})\n")
+                    render_logger.error(f"Clip {idx+1} FAILED for version {version_id}")
                     
             except Exception as e:
                 render_state.status = "failed"
                 render_state.message = f"Error: {str(e)}"
                 log_file.write(f"[RENDER] EXCEPTION: {str(e)}\n")
+                render_logger.exception(f"Clip {idx+1} EXCEPTION for version {version_id}: {str(e)}")
             log_file.flush()
+    render_logger.info(f"END BATCH RENDER: Version {version_id}")
 
 @app.post("/api/render")
 async def render_clips(render_req: RenderRequest, request: Request, background_tasks: BackgroundTasks):
@@ -982,7 +1154,7 @@ async def render_clips(render_req: RenderRequest, request: Request, background_t
             if data.get("user_id") and data.get("user_id") != user_id:
                 raise HTTPException(status_code=403, detail="Unauthorized to render this project")
 
-    background_tasks.add_task(do_render_queue, render_req.version, render_req.indices)
+    background_tasks.add_task(do_render_queue, render_req.version, render_req.indices, render_req.preferredLanguage)
     return {"message": "Render started for selected clips"}
 
 if __name__ == "__main__":

@@ -147,67 +147,74 @@ def translate_full_transcript_global(segments_data):
         if i > 0:
             prev_context = [s["text"] for s in segments_data[max(0, i-5) : i]]
         
+        # Prepare a dictionary for translation to maintain mapping integrity
+        batch_map = {str(idx): text for idx, text in enumerate(batch_texts)}
+        
         prompt = f"""
-        Act as a professional translator. Translate the following list of segments into Spanish.
+        Act as a professional translator. Translate the following segments into Spanish.
         
         CONTEXT FROM PREVIOUS SEGMENTS (Do NOT translate these, just use for continuity):
         {json.dumps(prev_context)}
         
-        SEGMENTS TO TRANSLATE NOW:
-        {json.dumps(batch_texts)}
+        SEGMENTS TO TRANSLATE (Index mapping):
+        {json.dumps(batch_map)}
         
         INSTRUCTIONS:
         1. Maintain a professional, clean, and engaging tone.
         2. Ensure terminological consistency with the context provided.
-        3. IMPORTANT: Return ONLY a raw JSON array of strings.
-        4. The output array MUST have EXACTLY {len(batch_texts)} strings. Each string corresponds to one segment from 'SEGMENTS TO TRANSLATE NOW'.
+        3. IMPORTANT: Return a raw JSON object where the keys are the INDEXES from the input and the values are the TRANSLATED strings.
+        4. You must translate ALL keys.
         """
         
-        translated_texts = []
+        translated_map = {}
         max_retries = 3
         current_delay = 1
         
         for attempt in range(max_retries):
             try:
-                # Brief pause to avoid rate limits
                 time.sleep(current_delay) 
                 response = client.models.generate_content(
                     model='gemini-2.5-flash',
                     contents=prompt,
                     config=types.GenerateContentConfig(response_mime_type="application/json")
                 )
-                translated_texts = json.loads(response.text)
+                translated_map = json.loads(response.text)
                 
-                if len(translated_texts) >= len(batch):
+                # Validate that we have most of the keys
+                if len(translated_map) >= len(batch):
                     break # Success
                 else:
-                    logger.warning(f"Batch {i} returned fewer translations than expected ({len(translated_texts)}/{len(batch)}). Retrying...")
+                    logger.warning(f"Batch {i} returned fewer translations than expected ({len(translated_map)}/{len(batch)}). Retrying...")
                     time.sleep(current_delay)
             except Exception as e:
+                # ... same error handling ...
                 if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                     logger.warning(f"Quota hit for batch {i}. Retry {attempt+1}/{max_retries} in {current_delay}s...")
                     time.sleep(current_delay * 2)
-                    current_delay *= 2 # Exponential backoff
+                    current_delay *= 2 
                 else:
                     logger.error(f"Error in batch {i}: {e}")
                     break
 
-        if translated_texts:
-            if len(translated_texts) != len(batch):
-                logger.warning(f"Translation count mismatch in batch! Expected {len(batch)}, got {len(translated_texts)}. Some segments might lose sync.")
-            
-            # Map back and INTERPOLATE words for each segment
-            for idx, trans_text in enumerate(translated_texts):
-                if idx >= len(batch): break # Security limit
+        if translated_map:
+            # Map back using the ORIGINAL order and segment boundaries
+            for idx in range(len(batch)):
+                idx_str = str(idx)
+                trans_text = translated_map.get(idx_str)
+                
                 orig_seg = batch[idx]
                 seg_start = orig_seg["start"]
                 seg_end = orig_seg["end"]
                 duration = seg_end - seg_start
                 
-                trans_words = trans_text.split()
-                if not trans_words: 
-                    # If empty translation, use original to avoid empty subtitles
+                if not trans_text:
+                    # Fallback if key is missing
                     trans_words = [w["word"] for w in orig_seg["words"]]
+                else:
+                    trans_words = trans_text.split()
+                
+                if not trans_words:
+                    trans_words = ["[...]"]
                 
                 # Distribute segment duration across translated words
                 word_dur = duration / len(trans_words)
@@ -224,7 +231,38 @@ def translate_full_transcript_global(segments_data):
                 
     return all_translated_words
 
-def analyze_with_gemini(transcript):
+# Global constants for Supabase
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
+def get_supabase_accounts(user_id=None):
+    """Fetch user's social media accounts from Supabase to provide context to Gemini."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        logger.warning("Supabase credentials missing. Cannot fetch accounts.")
+        return []
+    
+    url = f"{SUPABASE_URL}/rest/v1/accounts?select=id,name,niche"
+    if user_id:
+        url += f"&user_id=eq.{user_id}"
+    
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            logger.warning(f"Failed to fetch accounts: {response.status_code} - {response.text}")
+    except Exception as e:
+        logger.error(f"Error fetching accounts from Supabase: {e}")
+    
+    return []
+
+def analyze_with_gemini(transcript, user_id=None):
     """
     MOTOR DE EXTRACCIÓN VIRAL v3.0 — Llamada única con chain-of-thought
 
@@ -309,6 +347,12 @@ Lee la transcripción completa y extrae:
 - frases_gancho: las 5-8 frases literales más poderosas, las que podrían detener el scroll
 - momentos_intensos: mínimo 3, máximo 10 picos emocionales, revelaciones,
   contradicciones, historias personales o datos impactantes con sus timestamps
+- is_podcast: true si detectas un diálogo/entrevista entre 2 o más personas, 
+  false si es un monólogo, un solo narrador hablando a cámara o un tutorial.
+  
+- account_id: Elije el ID de la cuenta de esta lista que mejor encaja con el nicho del video:
+  {json.dumps(get_supabase_accounts(user_id), ensure_ascii=False)}
+  Si ninguna encaja bien, pon null.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PASO 2 — EXTRACCIÓN DE CLIPS VIRALES
@@ -417,6 +461,8 @@ Si ningún clip alcanza score >= 5, devuelve "clips" como array vacío.
 {{
   "context": {{
     "tema_central": "<string>",
+    "is_podcast": <boolean>,
+    "account_id": <number|null>,
     "tono": "<string>",
     "angulo_unico": "<string>",
     "datos_concretos": ["<string>"],
@@ -634,9 +680,13 @@ def _extract_split_candidates(people, faces, w_f):
 
     return True, c_left, c_right
 
-def analyze_framing_high_precision_local(video_path, start_time, end_time):
+
+    return True, c_left, c_right
+
+
+def analyze_framing_high_precision_local(video_path, start_time, end_time, is_podcast=True):
     """Refactored Scene-Based Framing for high precision and scalability using MediaPipe (LOCAL)."""
-    logger.info("Starting Local HIGH-PRECISION Framing Analysis (MediaPipe)...")
+    logger.info(f"Starting Local HIGH-PRECISION Framing Analysis (MediaPipe) [is_podcast={is_podcast}]...")
     try:
         import cv2
         import mediapipe as mp
@@ -738,13 +788,19 @@ def analyze_framing_high_precision_local(video_path, start_time, end_time):
 
                 # --- NEW REFINED LOGIC (Cross-Validation) ---
                 if len(people) >= 2:
-                    layout = "split"
-                    p_sorted = sorted(people, key=lambda d: d.bounding_box.origin_x)
-                    p1_x = (p_sorted[0].bounding_box.origin_x + p_sorted[0].bounding_box.width/2) / w_f
-                    p2_x = (p_sorted[1].bounding_box.origin_x + p_sorted[1].bounding_box.width/2) / w_f
-                    center_top = p1_x
-                    center_bottom = p2_x
-                    center = p1_x
+                    if is_podcast:
+                        layout = "split"
+                        p_sorted = sorted(people, key=lambda d: d.bounding_box.origin_x)
+                        p1_x = (p_sorted[0].bounding_box.origin_x + p_sorted[0].bounding_box.width/2) / w_f
+                        p2_x = (p_sorted[1].bounding_box.origin_x + p_sorted[1].bounding_box.width/2) / w_f
+                        center_top = p1_x
+                        center_bottom = p2_x
+                        center = p1_x
+                    else:
+                        layout = "single"
+                        # Centrar en la persona más prominente (mayor área)
+                        best_p = max(people, key=lambda d: d.bounding_box.width * d.bounding_box.height)
+                        center = (best_p.bounding_box.origin_x + best_p.bounding_box.width/2) / w_f
                 elif len(people) == 1:
                     layout = "single"
                     p_center = (people[0].bounding_box.origin_x + people[0].bounding_box.width/2) / w_f
@@ -754,13 +810,14 @@ def analyze_framing_high_precision_local(video_path, start_time, end_time):
                     else:
                         center = p_center
                 elif len(faces) >= 1:
-                    if len(faces) >= 2:
+                    if len(faces) >= 2 and is_podcast:
                         layout = "split"
                         f_sorted = sorted(faces, key=lambda f: f.bounding_box.origin_x)
                         center_top = (f_sorted[0].bounding_box.origin_x + f_sorted[0].bounding_box.width/2) / w_f
                         center_bottom = (f_sorted[1].bounding_box.origin_x + f_sorted[1].bounding_box.width/2) / w_f
                         center = center_top
                     else:
+                        layout = "single"
                         center = (faces[0].bounding_box.origin_x + faces[0].bounding_box.width/2) / w_f
 
                 segments.append({
@@ -1058,12 +1115,18 @@ if __name__ == "__main__":
         # 2.5 GLOBAL TRANSLATION (Scaling improvement)
         full_translated_words = translate_full_transcript_global(transcript['segments'])
 
-        # 3. Analyze
-        multi_analysis = analyze_with_gemini(transcript)
-        if not multi_analysis or "clips" not in multi_analysis or not multi_analysis["clips"]:
+        # 3. Analyze Transcript with Gemini (New v3.0 logic with context and account detection)
+        analysis_result = analyze_with_gemini(transcript, user_id=user_id)
+        
+        context = analysis_result.get("context", {})
+        raw_clips = analysis_result.get("clips", [])
+        is_podcast_global = context.get("is_podcast", False)
+        selected_account_id = context.get("account_id")
+        logger.info(f"GEMINI CONTEXT — Format: {'Podcast/Interview' if is_podcast_global else 'Monologue/Tutorial'}")
+
+        if not analysis_result or not raw_clips:
             raise ValueError("Gemini failed to identify any viral clips.")
             
-        raw_clips = multi_analysis["clips"]
         # Sort by score desc (Gemini should already do this, but ensure it)
         raw_clips.sort(key=lambda x: x.get('score', 0), reverse=True)
         
@@ -1103,7 +1166,7 @@ if __name__ == "__main__":
             ]
             
             # 3.8 Intelligent Framing (uses lightweight proxy for speed, same normalized coords)
-            framing_data = analyze_framing_high_precision_local(PROXY_FILE, start_time, end_time)
+            framing_data = analyze_framing_high_precision_local(PROXY_FILE, start_time, end_time, is_podcast=is_podcast_global)
             
             # 3.85 Process B-roll Suggestions and Adjust Times
             edit_events = analysis.get("edit_events", {"zooms": [], "icons": [], "b_rolls": [], "backgrounds": []})
@@ -1148,6 +1211,8 @@ if __name__ == "__main__":
             "version": version,
             "user_id": user_id,
             "video_title": video_title,
+            "account_id": selected_account_id,
+            "is_podcast": is_podcast_global,
             # For backward compatibility, keep top clip markers at root
             "words": processed_clips[0]["words"],
             "words_es": processed_clips[0]["words_es"],

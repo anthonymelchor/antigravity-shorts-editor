@@ -53,6 +53,8 @@ export default function Home() {
     const [alert, setAlert] = useState<{ msg: string; type: 'error' | 'warning' } | null>(null);
     const [activeUrl, setActiveUrl] = useState<string | null>(null);
     const [currentVersion, setCurrentVersion] = useState<string | null>(null);
+    const [accounts, setAccounts] = useState<any[]>([]);
+    const [isEditingMetadata, setIsEditingMetadata] = useState(false);
     const [isLaunching, setIsLaunching] = useState(false);
     const processingRef = useRef<string | null>(null);
     const versionRef = useRef<string | null>(null);
@@ -95,7 +97,20 @@ export default function Home() {
 
     useEffect(() => {
         fetchProjects();
+        fetchAccounts();
     }, []);
+
+    const fetchAccounts = async () => {
+        try {
+            const res = await authFetch(`${API_BASE}/api/accounts`);
+            const data = await res.json();
+            if (Array.isArray(data)) {
+                setAccounts(data);
+            }
+        } catch (err) {
+            console.error("Failed to fetch accounts", err);
+        }
+    };
 
     const fetchProjects = async () => {
         try {
@@ -286,6 +301,25 @@ export default function Home() {
         } catch (err) { console.error("Auto-save failed", err); }
     };
 
+    const updateMetadata = async (metadata: any) => {
+        try {
+            if (!transcript?.version) return;
+            const res = await authFetch(`${API_BASE}/api/update-metadata`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    version: transcript.version,
+                    user_id: '',
+                    ...metadata
+                })
+            });
+            const result = await res.json();
+            if (result.status === 'success') {
+                setTranscript({ ...transcript, ...result.data });
+            }
+        } catch (err) { console.error("Metadata update failed", err); }
+    };
+
     const handleRender = async (clipIdx?: number) => {
         if (!transcript?.version) {
             setAlert({ msg: "No version found to render", type: 'error' });
@@ -310,7 +344,8 @@ export default function Home() {
                 body: JSON.stringify({
                     version: transcript.version,
                     user_id: '',  // Server extracts from token now
-                    indices: indicesToRender
+                    indices: indicesToRender,
+                    preferredLanguage
                 })
             });
             const data = await res.json();
@@ -360,7 +395,47 @@ export default function Home() {
             </nav>
 
             <div className="border-b border-white/5 py-4 px-12 flex justify-between items-center bg-[#050505] sticky top-0 z-50">
-                <span className="text-xs font-bold text-neutral-500 uppercase tracking-widest">Select the clips you want to export</span>
+                <div className="flex items-center gap-6">
+                    <span className="text-xs font-bold text-neutral-500 uppercase tracking-widest">Select the clips you want to export</span>
+                    <div className="h-4 w-px bg-white/10" />
+                    <div className="flex items-center gap-3 bg-white/5 px-4 py-2 rounded-xl border border-white/10 group relative">
+                        <div className="flex flex-col">
+                            <span className="text-[9px] font-black text-white/40 uppercase tracking-tighter">Branding Identity</span>
+                            <span className="text-[11px] font-bold text-white/90">
+                                {accounts.find(a => a.id === transcript?.account_id)?.niche || 'General'}
+                                <span className="mx-2 text-white/20">|</span>
+                                <span className="text-purple-400">@{accounts.find(a => a.id === transcript?.account_id)?.name || 'rocotoclip'}</span>
+                            </span>
+                        </div>
+                        <button
+                            onClick={() => setIsEditingMetadata(!isEditingMetadata)}
+                            className="p-1.5 hover:bg-white/10 rounded-lg transition-all text-neutral-400 hover:text-white cursor-pointer"
+                        >
+                            <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+
+                        {isEditingMetadata && (
+                            <div className="absolute top-full left-0 mt-2 w-72 bg-[#121212] border border-white/10 rounded-2xl shadow-2xl p-4 z-[70] animate-in fade-in slide-in-from-top-2">
+                                <h4 className="text-[10px] font-black uppercase text-neutral-500 mb-3 px-2">Select Branding Account</h4>
+                                <div className="flex flex-col gap-1">
+                                    {accounts.map(acc => (
+                                        <button
+                                            key={acc.id}
+                                            onClick={() => {
+                                                updateMetadata({ account_id: acc.id });
+                                                setIsEditingMetadata(false);
+                                            }}
+                                            className={`flex flex-col items-start px-3 py-2 rounded-xl transition-all cursor-pointer ${transcript?.account_id === acc.id ? 'bg-purple-600/20 border border-purple-500/30' : 'hover:bg-white/5 border border-transparent'}`}
+                                        >
+                                            <span className="text-xs font-bold text-white">{acc.niche}</span>
+                                            <span className="text-[10px] text-neutral-500">@{acc.name}</span>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
                 <button
                     onClick={() => handleRender()}
                     disabled={selectedForRender.length === 0}

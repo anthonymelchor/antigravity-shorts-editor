@@ -2,6 +2,7 @@ import { AbsoluteFill, Video, OffthreadVideo, Audio, staticFile, useVideoConfig,
 import { Subtitles } from './Subtitles';
 import { ZoomManager } from './ZoomManager';
 import { DynamicLayer } from './DynamicLayer';
+import { Watermark } from './Watermark';
 import transcriptData from './transcript_data.json';
 
 export interface FramingSegment {
@@ -31,6 +32,8 @@ export interface Transcript {
         b_rolls: any[];
         backgrounds: any[];
     };
+    instagram_handle?: string;
+    niche_name?: string;
 }
 
 interface MainProps {
@@ -180,6 +183,10 @@ export const Main: React.FC<MainProps> = ({
                     transcript={transcript}
                     currentLayout={activeLayout}
                     preferredLanguage={preferredLanguage}
+                />
+                <Watermark
+                    text={transcript.instagram_handle ? `@${transcript.instagram_handle}` : "ROCOTOCLIP"}
+                    opacity={1}
                 />
             </div>
         </AbsoluteFill>

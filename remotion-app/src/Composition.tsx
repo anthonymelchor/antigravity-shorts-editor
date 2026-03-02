@@ -2,6 +2,7 @@ import { AbsoluteFill, Video, OffthreadVideo, Audio, staticFile, useVideoConfig,
 import { Subtitles } from './Subtitles';
 import { ZoomManager } from './ZoomManager';
 import { DynamicLayer } from './DynamicLayer';
+import { Watermark } from './Watermark';
 import transcriptData from './transcript_data.json';
 
 export interface FramingSegment {
@@ -29,6 +30,8 @@ export interface Transcript {
         b_rolls: any[];
         backgrounds: any[];
     };
+    instagram_handle?: string;
+    niche_name?: string;
 }
 
 interface MainProps {
@@ -163,6 +166,10 @@ export const Main: React.FC<MainProps> = ({
             <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
                 <DynamicLayer events={editEvents} />
                 <Subtitles transcript={transcript} currentLayout={layout} preferredLanguage={preferredLanguage} />
+                <Watermark
+                    text={transcript.instagram_handle ? `@${transcript.instagram_handle}` : "ROCOTOCLIP"}
+                    opacity={1}
+                />
             </div>
         </AbsoluteFill>
     );
@@ -218,6 +225,10 @@ export const Main: React.FC<MainProps> = ({
                 }}>
                     <DynamicLayer events={editEvents} />
                     <Subtitles transcript={transcript} preferredLanguage={preferredLanguage} />
+                    <Watermark
+                        text={transcript.instagram_handle ? `@${transcript.instagram_handle}` : "ROCOTOCLIP"}
+                        opacity={1}
+                    />
                 </div>
             </AbsoluteFill>
 

@@ -20,7 +20,7 @@ export const RemotionRoot: React.FC = () => {
                 width={1080}
                 height={1920}
                 defaultProps={{
-                    horizontalOffset: 0,
+                    preferredLanguage: (transcriptData as any).preferredLanguage || 'en',
                 }}
             />
         </>
