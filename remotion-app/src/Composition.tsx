@@ -132,10 +132,12 @@ export const Main: React.FC<MainProps> = ({
                     left: `${leftValue}px`,
                     top: `${yOffset}px`,
                     objectFit: 'cover', // ABSOLUTE REQUIREMENT FOR BROWSER PREVIEW MATCH
+                    maxWidth: 'none', // Critical to override Tailwind/Next.js default max-width: 100%
                 }}
             />
         );
     };
+
 
     const renderFinalComposition = () => (
         <AbsoluteFill style={{ backgroundColor: '#000' }}>

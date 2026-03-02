@@ -367,9 +367,9 @@ PENALIZACIONES:
 -2 más de 10 segundos consecutivos sin frase de alto valor
 -1 clip depende de contexto muy específico que el espectador no tiene
 
-UMBRAL: válido SOLO si score >= 5. Prioriza score >= 8.
+UMBRAL: válido SOLO si score >= 5.
 
-DURACIÓN: MÍNIMO 23s | IDEAL 35-60s | MÁXIMO 75s
+DURACIÓN: MÍNIMO 23s | IDEAL 40-60s | MÁXIMO 75s
 Si una idea poderosa dura más de 75s, extrae el sub-fragmento más intenso.
 
 AUTONOMÍA NARRATIVA FLEXIBLE:
@@ -604,6 +604,35 @@ def detect_face_center_mediapipe(image_path):
         print(f"  [MediaPipe] Error: {e}")
         return None
 
+
+def _extract_split_candidates(people, faces, w_f):
+    """
+    Extrae los centros horizontales de los dos sujetos más prominentes
+    si están suficientemente separados y en mitades opuestas.
+    Devuelve (es_candidato_split, centro_izq, centro_der).
+    """
+    subjects = people if len(people) >= 2 else (faces if len(faces) >= 2 else [])
+    if len(subjects) < 2:
+        return False, 0.5, 0.5
+
+    top2 = sorted(subjects,
+                  key=lambda d: d.bounding_box.width * d.bounding_box.height,
+                  reverse=True)[:2]
+
+    centers = sorted(
+        [(d.bounding_box.origin_x + d.bounding_box.width / 2) / w_f for d in top2]
+    )
+    c_left, c_right = centers[0], centers[1]
+
+    # Separación mínima 25% — descarta abrazados, grupos compactos, multitudes
+    if (c_right - c_left) < 0.25:
+        return False, (c_left + c_right) / 2, (c_left + c_right) / 2
+
+    # Cada sujeto debe estar en su propia mitad de pantalla
+    if not (c_left < 0.55 and c_right > 0.45):
+        return False, c_left, c_right
+
+    return True, c_left, c_right
 
 def analyze_framing_high_precision_local(video_path, start_time, end_time):
     """Refactored Scene-Based Framing for high precision and scalability using MediaPipe (LOCAL)."""
@@ -996,8 +1025,6 @@ if __name__ == "__main__":
     
     # Define working filenames for this run (organized in project folder)
     INPUT_FILE = os.path.join(PROJECT_DIR, "input.mp4")
-    VIDEO_OUT = os.path.join(PROJECT_DIR, f"video_{version}.mp4")  # legacy, not directly used
-    AUDIO_OUT = os.path.join(PROJECT_DIR, f"audio_{version}.wav")   # legacy, not directly used
     TRANSCRIPT_FILE = os.path.join(PROJECT_DIR, "transcript.json")
 
     try:
@@ -1041,7 +1068,7 @@ if __name__ == "__main__":
         raw_clips.sort(key=lambda x: x.get('score', 0), reverse=True)
         
         # NO hard limit — clips are already filtered by score ≥ 4 in analyze_with_gemini
-        logger.info(f"Processing {len(raw_clips)} clips that passed peak moment scoring (score ≥ 4)")
+        logger.info(f"Processing {len(raw_clips)} clips that passed peak moment scoring (score ≥ 5)")
         
         processed_clips = []
         

@@ -357,29 +357,8 @@ REMOTION_DIR = os.path.join(BASE_DIR, "remotion-app")
 
 ALLOWED_MEDIA_EXTENSIONS = {".mp4", ".wav", ".webm", ".jpg", ".png"}
 
-@app.get("/api/media/{filename}")
-async def serve_media(filename: str, request: Request):
-    """Serve media files with ownership validation."""
-    user_id = await get_current_user(request)
-    
-    ext = os.path.splitext(filename)[1].lower()
-    if ext not in ALLOWED_MEDIA_EXTENSIONS:
-        raise HTTPException(status_code=403, detail="File type not allowed")
-    
-    safe_name = os.path.basename(filename)
-    file_path = os.path.join(BASE_DIR, safe_name)
-    
-    if not os.path.exists(file_path) or not os.path.isfile(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    parts = safe_name.split("_")
-    if len(parts) >= 2:
-        version = parts[1]
-        t_path = os.path.join(BASE_DIR, f"transcript_{version}.json")
-        if os.path.exists(t_path) and not _validate_file_ownership(t_path, user_id):
-            raise HTTPException(status_code=403, detail="You don't own this file")
-    
-    return FileResponse(file_path, media_type="application/octet-stream")
+# Consolidated Media Serving moved to the bottom for clarity and hierarchy.
+
 
 # State management
 # Multi-process Registry
@@ -650,38 +629,44 @@ async def reset_project(request: Request):
 
 @app.get("/api/media/{version}/{filename}")
 async def serve_media(version: str, filename: str, request: Request):
-    """Professional Media Serving with User Isolation and Range support."""
+    """Secure Unified Media Serving with User Isolation."""
     user_id = await get_current_user(request)
     
     proj_dir = find_project_dir(version)
     if not proj_dir:
-        raise HTTPException(status_code=404, detail="Project folder not found")
+        # Fallback to root directory if no project folder found (Legacy support)
+        file_path = os.path.join(BASE_DIR, os.path.basename(filename))
+        if os.path.exists(file_path):
+            # Check ownership on root transcripts if available
+            t_root = os.path.join(BASE_DIR, f"transcript_{version}.json")
+            if os.path.exists(t_root) and not _validate_file_ownership(t_root, str(user_id)):
+                raise HTTPException(status_code=403, detail="Access denied")
+            return FileResponse(file_path)
+        raise HTTPException(status_code=404, detail="Project or file not found")
         
-    # Verify ownership via transcript.json
+    # Verify ownership via transcript.json inside the project
     t_path = os.path.join(proj_dir, "transcript.json")
     if os.path.exists(t_path):
         try:
             with open(t_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if data.get("user_id") and data.get("user_id") != user_id:
+                # Cast to str to ensure match with Supabase UUID strings
+                if data.get("user_id") and str(data.get("user_id")) != str(user_id):
+                    print(f"[SECURITY] Blocking user {user_id} access to {filename} in {version}")
                     raise HTTPException(status_code=403, detail="Unauthorized access to this media")
+        except HTTPException: raise
         except: pass
     
-    # Locate the file in project structure
-    # 1. Check in root of project (input.mp4, proxy.mp4)
-    file_path = os.path.join(proj_dir, filename)
-    if not os.path.exists(file_path):
-        # 2. Check in clips/ (video_clip_1.mp4, etc)
-        file_path = os.path.join(proj_dir, "clips", filename)
-    if not os.path.exists(file_path):
-        # 3. Check in renders/ (out_clip_1.mp4, etc)
-        file_path = os.path.join(proj_dir, "renders", filename)
-        
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail=f"Media file {filename} not found in project {version}")
-        
-    # FileResponse automatically handles Range requests for video seeking/streaming
-    return FileResponse(file_path)
+    # Locate the file (Root -> Clips -> Renders)
+    search_dirs = [proj_dir, os.path.join(proj_dir, "clips"), os.path.join(proj_dir, "renders")]
+    for d in search_dirs:
+        file_path = os.path.join(d, filename)
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            # Pro tip: FileResponse handles 'Range' internally for zero-lag seeking
+            return FileResponse(file_path)
+            
+    print(f"[MEDIA] File {filename} NOT found in project {version}")
+    raise HTTPException(status_code=404, detail=f"File {filename} not found")
 
 @app.get("/api/projects")
 async def list_projects(request: Request):
@@ -925,6 +910,12 @@ def do_render_queue(version_id, clip_indices):
                 if a_name and os.path.exists(a_path):
                     shutil.copy(a_path, os.path.join(remotion_public, a_name))
                 
+                # IMPORTANT: Delete previous render output to avoid stale copies if build fails
+                final_out = os.path.join(REMOTION_DIR, "out.mp4")
+                if os.path.exists(final_out):
+                    try: os.remove(final_out)
+                    except: pass
+
                 render_state.message = f"Building Clip #{idx+1}..."
                 render_state.progress = 20
                 log_file.write(f"[RENDER] Running Remotion build for Clip #{idx+1}...\n")
