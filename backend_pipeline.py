@@ -226,200 +226,317 @@ def translate_full_transcript_global(segments_data):
 
 def analyze_with_gemini(transcript):
     """
-    MOTOR DE EXTRACCIÓN DE MOMENTOS PICO
-    
-    Detects and extracts specific segments with high virality potential
-    in short format (23-75 seconds). Uses strict criteria for emotional
-    intensity, structural clarity, and narrative autonomy.
-    
-    Scoring: +3/+2/+1 system (max ~17), threshold ≥ 4.
-    Classification: EXPLOSION / AUTORIDAD / CONVERSION per clip.
-    No hard limit on clips — quality is the only filter.
+    MOTOR DE EXTRACCIÓN VIRAL v3.0 — Llamada única con chain-of-thought
+
+    Una sola llamada a Gemini. El JSON de salida tiene dos secciones:
+      "context" — razonamiento previo: Gemini analiza el vídeo completo
+                  antes de seleccionar nada (tema, tono, momentos intensos,
+                  frases gancho, datos concretos).
+      "clips"   — extracción final: usando el contexto como guía, selecciona
+                  los mejores fragmentos aplicando los 3 pilares virales
+                  (Hook / Hold / Reward).
+
+    El orden en el JSON obliga al modelo a pensar antes de decidir.
+    Mismo beneficio que dos llamadas, un solo API call.
+
+    Score unificado: umbral único >= 5 en prompt y en código.
+    Sin límite fijo de clips — la calidad es el único filtro.
     """
-    logger.info("=== MOTOR DE EXTRACCIÓN DE MOMENTOS PICO ===")
-    logger.info("Analyzing transcript for high-intensity peak moments...")
+    logger.info("=== MOTOR DE EXTRACCIÓN VIRAL v3.0 ===")
+    logger.info("Iniciando análisis viral (llamada única con chain-of-thought)...")
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable not set.")
-        
+
     client = genai.Client(api_key=api_key)
 
+    # Transcripción en dos formatos:
+    # 1. Segmentos legibles — para análisis narrativo y selección de clips
+    transcript_text = "\n".join(
+        f"[{s['start']:.1f}s - {s['end']:.1f}s] {s['text']}"
+        for s in transcript['segments']
+    )
+    # 2. Words con timestamps precisos — para anclar zooms e iconos a momentos exactos
+    # Muestreo dinámico basado en duración real del vídeo:
+    # - Vídeos cortos (<20 min): todos los words sin límite
+    # - Vídeos medianos (20-40 min): muestra representativa de 3.000 words
+    # - Vídeos largos (>40 min): muestra representativa de 4.000 words
+    # La muestra es DISTRIBUIDA uniformemente (no truncada), para que Gemini
+    # vea el inicio, el medio y el final con igual atención.
+    all_words = transcript['words']
+    total_words = len(all_words)
+    video_duration_min = (all_words[-1]['end'] / 60.0) if all_words else 0
+
+    if video_duration_min <= 20:
+        # Vídeo corto — enviar todo
+        sampled_words = all_words
+    else:
+        # Vídeo largo — muestra distribuida uniformemente
+        max_words = 4000 if video_duration_min > 40 else 3000
+        if total_words <= max_words:
+            sampled_words = all_words
+        else:
+            # Calcular paso de muestreo para distribuir uniformemente
+            step = total_words / max_words
+            sampled_words = [all_words[int(i * step)] for i in range(max_words)]
+
+        logger.info(
+            f"Vídeo largo ({video_duration_min:.1f} min) — words muestreados: "
+            f"{len(sampled_words)}/{total_words} (distribuidos uniformemente)"
+        )
+
+    transcript_words = json.dumps(sampled_words, ensure_ascii=False)
+
     prompt = f"""
-You are an expert viral content editor for high-performance faceless social media accounts.
-You are NOT summarizing the video. You are detecting and extracting specific segments
-with high virality potential in short format (23-75 seconds).
+Eres el mejor editor de contenido viral del mundo. Tu respuesta tiene DOS PASOS
+que debes ejecutar EN ORDEN dentro de un único JSON.
 
-=== MANDATORY CLIP RULES ===
-A fragment is ONLY valid if it meets ALL of these conditions:
-1. Can be understood WITHOUT prior context
-2. Contains a COMPLETE idea (beginning + development + mini-closure)
-3. Has a strong or disruptive phrase in the FIRST 5 seconds
-4. Generates clear emotion (controversy, revelation, warning, validation, diagnosis)
-5. Does NOT depend on unexplained proper nouns
-6. Is NOT an introduction or farewell
+PASO 1 → rellena el objeto "context" (tu razonamiento previo sobre el vídeo)
+PASO 2 → rellena el array "clips" (tu selección final, usando el contexto del paso 1)
 
-=== DURATION ===
-MINIMUM: 23 seconds | IDEAL: 35-55 seconds | MAXIMUM: 75 seconds
-Reject fragments < 20 seconds or > 90 seconds.
-If a powerful idea lasts > 75s, find the most intense sub-fragment within it.
+Este orden es obligatorio. Primero entiendes el vídeo, luego extraes los clips.
 
-=== MANDATORY SCORING SYSTEM ===
-Score each potential fragment by SUMMING these points:
-+3 if it challenges a common belief
-+3 if it contains an unexpected revelation
-+2 if it contains a strong warning
-+2 if it contains a specific error/mistake
-+2 if it contains clear psychological diagnosis
-+2 if it includes a personal micro-story
-+2 if it generates potential debate
-+1 if it offers actionable practical advice
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PASO 1 — ANÁLISIS DE CONTEXTO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-A clip is valid ONLY if it scores >= 4. Prioritize clips with score >= 7.
+Lee la transcripción completa y extrae:
 
-=== PEAK MOMENT DETECTORS ===
-Prioritize fragments where you detect:
-- Change in verbal intensity
-- Phrases repeated for emphasis
-- Strong language use
-- Clear contradictions
-- Phrases like: "La verdad es que...", "Nadie quiere admitir esto...",
-  "Si sigues haciendo esto...", "El problema real es...", "Lo que realmente pasa es..."
+- tema_central: una frase que resume de qué trata el vídeo
+- tono: motivacional / educativo / polémico / narrativo / mixto
+- angulo_unico: qué hace diferente a este creador vs. el resto del contenido del mismo tema
+- datos_concretos: cualquier cifra, edad, cantidad, precio, porcentaje mencionado
+- frases_gancho: las 5-8 frases literales más poderosas, las que podrían detener el scroll
+- momentos_intensos: mínimo 3, máximo 10 picos emocionales, revelaciones,
+  contradicciones, historias personales o datos impactantes con sus timestamps
 
-=== MANDATORY CLIP CLASSIFICATION ===
-Label each clip as (max 2 labels):
-- EXPLOSION: Generates polemic, can provoke disagreement, challenges dominant narrative
-- AUTORIDAD: Explains a mental framework, teaches clear psychology, strong logical structure
-- CONVERSION: Identifies specific pain, points out concrete error, allows indirect CTA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PASO 2 — EXTRACCIÓN DE CLIPS VIRALES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-=== STRATEGIC MIX ===
-Aim for approximately: 50% EXPLOSION | 30% AUTORIDAD | 20% CONVERSION
-If the video doesn't allow clear conversion, prioritize EXPLOSION.
+Usando el análisis del Paso 1 como guía, selecciona los fragmentos que puedan
+convertirse en shorts que la gente no pueda dejar de ver, que comenten,
+que guarden y que compartan.
 
-=== FINAL QUALITY FILTER ===
-Before returning a clip, verify:
-1. Is the first second strong enough to retain viewers?
-2. Can it be used as a short without additional explanation?
-3. Can it generate comments?
-4. Does it have a phrase that can be used as an impactful subtitle?
-If the answer is NO to 2 or more questions, DISCARD the clip.
+LOS 3 PILARES DEL SHORT VIRAL EN 2026:
 
-=== WHAT NOT TO DO ===
-❌ Do NOT select loose phrases without development
-❌ Do NOT choose generic parts like "we need to improve"
-❌ Do NOT choose flat educational content without tension
-❌ Do NOT choose fragments that depend on prior context
-❌ Do NOT choose long stories without a strong point
-❌ Do NOT choose parts where the speaker is rambling
+PILAR 1 — HOOK (primeros 3 segundos): EL MÁS IMPORTANTE
+El algoritmo mide qué porcentaje de espectadores pasan los 3 primeros segundos.
+Sin gancho fuerte el clip no existe, no importa qué tan bueno sea el resto.
 
-=== LEVEL OF DEMAND ===
-It is NOT mandatory to find clips if the content doesn't meet criteria.
-It is preferable to return:
-"NO CLIPS FOUND — INSUFFICIENT INTENSITY"
-than to return weak clips.
+Tipos de gancho (en orden de efectividad):
+1. CONTRAINTUITIVO — contradice lo que el espectador cree que es verdad
+   Ej: "Las metas están sobrevaloradas" / "La motivación es una mentira"
+2. DATO_IMPACTO — cifra específica + historia personal
+   Ej: "Tenía 5.7€ en mi cuenta y a los 21 años gané mi primer millón"
+3. PREGUNTA_DOLOR — pregunta que el espectador no puede ignorar porque lo describe
+   Ej: "¿Por qué hay gente con menos talento que tú ganando más dinero?"
+4. DIAGNOSTICO — nombrar el problema exacto que el espectador tiene
+   Ej: "El problema no es que no tengas tiempo. Es que dependes de la motivación."
+5. LOOP_ABIERTO — empezar algo y no terminarlo en los primeros 3s
+   Ej: "Déjame contarte por qué casi pierdo todo lo que construí..."
 
-=== EDITING STRATEGY ===
-- SOCIAL SEARCH TITLES: Generate titles in Spanish that answer specific user questions
-  (e.g., "¿Por qué siempre fracasas?" instead of generic titles).
-- MICRO-MOVEMENTS: Suggest zooms/cuts every 2-3s to keep visual engagement.
-- EMOJIS: Use 4-7 icons aligned with concept keywords.
-  AVAILABLE KEYWORDS: 'money', 'cash', 'rich', 'idea', 'think', 'mind', 'warning', 'alert',
-  'danger', 'stop', 'no', 'error', 'wrong', 'check', 'yes', 'correct', 'ok', 'time', 'clock',
-  'fast', 'speed', 'heart', 'love', 'hot', 'rocket', 'growth', 'up', 'down', 'work', 'task',
-  'office', 'success', 'win', 'star', 'laugh', 'funny', 'lol', 'wow', 'shock', 'amazing',
-  'cool', 'look', 'eye', 'sad', 'bad', 'cry', 'phone', 'computer', 'tech', 'camera', 'video',
-  'mic', 'search', 'find', 'link', 'lock', 'shield', 'tool', 'fix', 'build', 'book', 'learn',
-  'write', 'news', 'mail', 'chat', 'home', 'world', 'travel', 'sun', 'moon', 'star_special',
-  'music', 'sound', 'gift', 'party', 'health'
+PILAR 2 — HOLD (segundos 3-45): MANTENER LA RETENCIÓN
+La retención cae si hay más de 8 segundos sin una frase de alto valor.
+Un buen fragmento tiene una idea nueva o giro cada 8-10 segundos,
+usa storytelling (situación → conflicto → resolución), e incluye datos concretos.
 
-=== OUTPUT FORMAT (JSON) ===
-Return ONLY clips that score >= 4. If no clips meet criteria, return:
-{{"clips": [], "message": "NO CLIPS FOUND — INSUFFICIENT INTENSITY"}}
+PILAR 3 — REWARD (últimos 5 segundos): TRIGGER DE COMPARTIR
+Los vídeos que se comparten terminan con una verdad incómoda, un consejo
+accionable, o una frase que resume algo que el espectador sentía pero no podía articular.
 
-Otherwise return:
+SISTEMA DE PUNTUACIÓN — UMBRAL ÚNICO >= 5:
+
+HOOK (máx 9 pts):
++3 primera frase contradice creencia común o genera disonancia cognitiva
++3 contiene dato concreto (cifra, edad, cantidad) en los primeros 10 segundos
++2 hace pregunta que describe exactamente el dolor del espectador
++1 tiene loop abierto que obliga a seguir viendo
+
+HOLD (máx 6 pts):
++3 historia personal completa (situación → problema → resolución)
++2 giro narrativo o revelación que cambia el marco de la idea
++1 alta densidad de valor (varias ideas fuertes en poco tiempo)
+
+REWARD (máx 4 pts):
++2 genera debate o comentarios ("¿esto es verdad?", "yo también pasé por esto")
++2 termina con frase que el espectador quiere guardar o enviar a alguien
+
+PENALIZACIONES:
+-2 primeros 3 segundos débiles, genéricos o de introducción
+-2 más de 10 segundos consecutivos sin frase de alto valor
+-1 clip depende de contexto muy específico que el espectador no tiene
+
+UMBRAL: válido SOLO si score >= 5. Prioriza score >= 8.
+
+DURACIÓN: MÍNIMO 23s | IDEAL 35-60s | MÁXIMO 75s
+Si una idea poderosa dura más de 75s, extrae el sub-fragmento más intenso.
+
+AUTONOMÍA NARRATIVA FLEXIBLE:
+Se permiten referencias a conceptos universales (dinero, tiempo, éxito, fracaso,
+relaciones, salud). NO referencias a personas o eventos específicos sin explicar.
+
+DIVERSIDAD TEMÁTICA:
+Cada clip debe tener un ángulo diferente. No selecciones dos clips que digan
+esencialmente lo mismo aunque estén en distintos momentos del vídeo.
+
+CLASIFICACIÓN (máx 2 etiquetas por clip):
+- EXPLOSION: Desafía narrativa dominante, puede generar desacuerdo
+- AUTORIDAD: Framework mental claro, enseña psicología o lógica fuerte
+- CONVERSION: Identifica dolor específico, señala error concreto, CTA implícito
+MIX IDEAL: 50% EXPLOSION | 30% AUTORIDAD | 20% CONVERSION
+
+TÍTULOS: En español, orientados a búsqueda social real.
+Ej: "¿Por qué siempre abandono mis metas?" > "Cómo tener éxito"
+
+MICRO-MOVIMIENTOS: Zooms/cortes cada 2-4s para mantener engagement visual.
+
+ICONOS: 4-7 iconos por clip alineados con las palabras clave.
+KEYWORDS DISPONIBLES: 'money', 'cash', 'rich', 'idea', 'think', 'mind', 'warning',
+'alert', 'danger', 'stop', 'no', 'error', 'wrong', 'check', 'yes', 'correct', 'ok',
+'time', 'clock', 'fast', 'speed', 'heart', 'love', 'hot', 'rocket', 'growth', 'up',
+'down', 'work', 'task', 'office', 'success', 'win', 'star', 'laugh', 'funny', 'lol',
+'wow', 'shock', 'amazing', 'cool', 'look', 'eye', 'sad', 'bad', 'cry', 'phone',
+'computer', 'tech', 'camera', 'video', 'mic', 'search', 'find', 'link', 'lock',
+'shield', 'tool', 'fix', 'build', 'book', 'learn', 'write', 'news', 'mail', 'chat',
+'home', 'world', 'travel', 'sun', 'moon', 'star_special', 'music', 'sound',
+'gift', 'party', 'health'
+
+EDIT_EVENTS — REGLA CRÍTICA:
+Los "time" de zooms e iconos deben corresponder exactamente al "start" de una
+palabra real en la sección PALABRAS CON TIMESTAMPS al final de este prompt.
+NO inventes tiempos. Usa solo timestamps que existan en esa lista.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FORMATO DE SALIDA JSON — ESTRUCTURA OBLIGATORIA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Devuelve SIEMPRE este objeto completo. Primero "context", luego "clips".
+Si ningún clip alcanza score >= 5, devuelve "clips" como array vacío.
+
 {{
+  "context": {{
+    "tema_central": "<string>",
+    "tono": "<string>",
+    "angulo_unico": "<string>",
+    "datos_concretos": ["<string>"],
+    "frases_gancho": ["<string>"],
+    "momentos_intensos": [
+      {{
+        "tiempo_inicio": 0.0,
+        "tiempo_fin": 0.0,
+        "descripcion": "<string>"
+      }}
+    ]
+  }},
   "clips": [
     {{
       "id": 1,
-      "title": "<Social Search Spanish Title>",
+      "title": "<Título en español para búsqueda social>",
       "start": 0.0,
       "end": 0.0,
       "score": 0,
-      "score_factors": ["challenges common belief (+3)", "strong warning (+2)"],
+      "hook_type": "<CONTRAINTUITIVO / DATO_IMPACTO / PREGUNTA_DOLOR / DIAGNOSTICO / LOOP_ABIERTO>",
+      "score_breakdown": {{
+        "hook": 0,
+        "hold": 0,
+        "reward": 0,
+        "penalties": 0
+      }},
+      "score_factors": ["<factor>"],
       "classification": ["EXPLOSION"],
-      "dominant_emotion": "indignación",
+      "dominant_emotion": "<indignación / revelación / validación / urgencia / esperanza>",
       "virality_level": 8,
-      "reasoning": "<Strategic explanation in SPANISH, 1-2 lines>",
+      "reasoning": "<Por qué puede volverse viral — 1-2 líneas en español>",
+      "comment_trigger": "<La frase que va a generar más comentarios>",
       "edit_events": {{
-          "zooms": [{{"time": 0.0, "type": "in", "intensity": 0.5}}],
-          "icons": [{{"time": 0.0, "keyword": "keyword", "layout": "center", "duration": 1.5}}],
-          "b_rolls": [{{"time": 0.0, "query": "English Pexels Search", "duration": 3.0}}]
+        "zooms": [{{"time": 0.0, "type": "in", "intensity": 0.5}}],
+        "icons": [{{"time": 0.0, "keyword": "keyword", "layout": "center", "duration": 1.5}}],
+        "b_rolls": [{{"time": 0.0, "query": "English Pexels search query", "duration": 3.0}}]
       }}
     }}
   ]
 }}
 
-Sort clips from HIGHEST to LOWEST score.
+Ordena los clips de MAYOR a MENOR score.
 
-=== TRANSCRIPT TO ANALYZE ===
-{json.dumps(transcript['words'][:2000])}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TRANSCRIPCIÓN — SEGMENTOS
+(usa para entender la narrativa y seleccionar clips)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{transcript_text}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TRANSCRIPCIÓN — PALABRAS CON TIMESTAMPS PRECISOS
+(usa SOLO esto para los "time" de zooms e iconos en edit_events)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{transcript_words}
 """
 
-    time.sleep(1)  # Brief pause to avoid 429 rate limit
+    time.sleep(1)
     response = None
     try:
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-            ),
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
-        
-        # Robust JSON cleaning: Gemini sometimes adds markdown or comments
+
         raw_text = response.text.strip()
         if raw_text.startswith("```"):
             raw_text = raw_text.split("```")[1]
             if raw_text.startswith("json"): raw_text = raw_text[4:]
-        
-        # Remove common "hallucinated" comments like (use '...')
+
         import re
         clean_text = re.sub(r'\s*\(use [^)]+\)', '', raw_text)
-        
+
         result = json.loads(clean_text)
-        
+
+        # Loguear contexto si está disponible
+        ctx = result.get("context", {})
+        if ctx:
+            logger.info(
+                f"Contexto extraído — Tema: '{ctx.get('tema_central', 'N/A')}' | "
+                f"Tono: {ctx.get('tono', 'N/A')} | "
+                f"Momentos intensos: {len(ctx.get('momentos_intensos', []))}"
+            )
+
         if "clips" in result and len(result["clips"]) > 0:
-            # Post-processing: enforce score threshold ≥ 6
-            valid_clips = [c for c in result["clips"] if c.get("score", 0) >= 6]
+            # Umbral único: score >= 5
+            valid_clips = [c for c in result["clips"] if c.get("score", 0) >= 5]
             rejected_count = len(result["clips"]) - len(valid_clips)
-            
             if rejected_count > 0:
-                logger.info(f"Filtered out {rejected_count} clips with score < 6")
-            
-            # Enforce duration limits (22-75 seconds)
+                logger.info(f"Filtrados {rejected_count} clips con score < 5")
+
+            # Validar duración (margen de seguridad 18-90s)
             duration_valid = []
             for c in valid_clips:
                 clip_duration = float(c.get('end', 0)) - float(c.get('start', 0))
-                if 18 <= clip_duration <= 90:  # Soft bounds for safety
+                if 18 <= clip_duration <= 90:
                     duration_valid.append(c)
                 else:
-                    logger.info(f"Filtered clip '{c.get('title', '')}' — duration {clip_duration:.1f}s out of range")
-            
+                    logger.info(f"Clip descartado '{c.get('title', '')}' — duración {clip_duration:.1f}s fuera de rango")
+
             result["clips"] = duration_valid
-            
+
             if duration_valid:
-                best_clip = duration_valid[0]
-                logger.info(f"Peak Moment Engine found {len(duration_valid)} valid clips (score ≥ 6). "
-                           f"Best: score={best_clip.get('score')}, starts at {best_clip.get('start')}s")
+                best = duration_valid[0]
+                logger.info(
+                    f"Motor Viral v3.0 encontró {len(duration_valid)} clips válidos (score ≥ 5). "
+                    f"Mejor: score={best.get('score')} | hook={best.get('hook_type')} | "
+                    f"inicia en {best.get('start')}s"
+                )
             else:
-                logger.warning("All clips filtered out — NO CLIPS FOUND with sufficient intensity")
+                logger.warning("Todos los clips filtrados — SIN CLIPS con intensidad suficiente")
         else:
-            logger.warning("Gemini returned NO CLIPS — INSUFFICIENT INTENSITY in transcript")
-        
+            logger.warning("Gemini no encontró clips — INTENSIDAD INSUFICIENTE en la transcripción")
+
         return result
+
     except Exception as e:
-        err_msg = f"Failed to process Gemini response. Error: {str(e)}"
+        err_msg = f"Error procesando respuesta de Gemini. Error: {str(e)}"
         if response and hasattr(response, 'text'):
-            err_msg += f" | Raw response: {response.text[:500]}..."
+            err_msg += f" | Respuesta raw: {response.text[:500]}..."
         logger.exception(err_msg)
         raise e
 
@@ -803,6 +920,39 @@ def process_video_ffmpeg(input_path, output_path, start_time, end_time, audio_pa
         raise e
 
 
+def snap_to_sentence_start(start_time, words, lookback_seconds=4.0):
+    """
+    Si el start_time cae en medio de una oración, retrocede al inicio
+    de la frase más cercana dentro de una ventana de lookback_seconds.
+    Detecta inicio de frase por dos señales:
+      1. La palabra empieza con mayúscula (inicio de oración)
+      2. Hay una pausa larga antes de la palabra (>0.4s entre palabras)
+    Siempre retrocede al candidato más reciente antes del start_time
+    para no alargar el clip más de lo necesario.
+    """
+    window_start = max(0.0, start_time - lookback_seconds)
+    candidates = [w for w in words if window_start <= w['start'] <= start_time]
+
+    if not candidates:
+        return start_time
+
+    best_start = start_time
+    for i, w in enumerate(candidates):
+        # Señal 1: palabra empieza con mayúscula → inicio de oración
+        if w['word'] and w['word'][0].isupper():
+            best_start = w['start']
+        # Señal 2: pausa larga antes de esta palabra → inicio de frase
+        if i > 0:
+            pause = w['start'] - candidates[i - 1]['end']
+            if pause > 0.4:
+                best_start = w['start']
+
+    if best_start != start_time:
+        logger.info(f"[Snap] Inicio ajustado: {start_time:.2f}s → {best_start:.2f}s")
+
+    return best_start
+
+
 def slugify(text, max_length=60):
     """Convert text to a clean folder name."""
     import unicodedata
@@ -905,6 +1055,8 @@ if __name__ == "__main__":
             
             # 3.5 Adjust Transcript Timestamps
             start_time = float(analysis.get('start', 0.0))
+            # Snap al inicio de frase más cercano — evita cortes en medio de oración
+            start_time = snap_to_sentence_start(start_time, transcript['words'])
             end_time = float(analysis.get('end', start_time + 30.0))
             
             adjusted_words = []
