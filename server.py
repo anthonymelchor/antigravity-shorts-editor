@@ -135,6 +135,23 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 # ============================================================
 _auth_cache = {}  # token_hash -> (user_id, expiry_timestamp)
 AUTH_CACHE_TTL = 300  # 5 minutes
+# ============================================================
+# ACCOUNTS: Centralized Branding Data (Temporary Mock)
+# ============================================================
+HARDCODED_ACCOUNTS = [
+    {"id": 1, "name": "dominatusmetas_", "niche": "Mentalidad y Éxito Masculino"},
+    {"id": 2, "name": "reinventatemujer_", "niche": "Empoderamiento y Amor Propio Femenino"},
+    {"id": 3, "name": "melchor_ia", "niche": "IA y Futuro"},
+    {"id": 4, "name": "reglas.del.amor", "niche": "Relaciones y Psicología Masc."},
+    {"id": 5, "name": "the_manifest_path", "niche": "Manifestación y Espiritualidad"}
+]
+
+def get_account_by_id(account_id):
+    if account_id is None: return None
+    try:
+        acc_id = int(account_id)
+        return next((a for a in HARDCODED_ACCOUNTS if a["id"] == acc_id), None)
+    except: return None
 
 async def get_current_user(request: Request) -> str:
     """Validate Supabase JWT and extract user_id. Results are cached."""
@@ -587,27 +604,12 @@ async def update_framing(update: FramingUpdate, request: Request):
 @app.get("/api/accounts")
 async def list_accounts(request: Request):
     """Fetch available social media accounts from Supabase."""
-    user_id = await get_current_user(request)
+    # user_id = await get_current_user(request) # Keep for future filtering
+    return HARDCODED_ACCOUNTS
     
-    url = f"{SUPABASE_URL}/rest/v1/accounts?select=id,name,niche"
-    if user_id:
-        url += f"&user_id=eq.{user_id}"
-    
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url, headers=headers)
-            if resp.status_code == 200:
-                return resp.json()
-            else:
-                raise HTTPException(status_code=resp.status_code, detail=resp.text)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    '''
+    # ... (Rest of Supabase code)
+    '''
 
 @app.post("/api/update-metadata")
 async def update_metadata(update: MetadataUpdate, request: Request):
@@ -634,19 +636,14 @@ async def update_metadata(update: MetadataUpdate, request: Request):
         data["is_podcast"] = update.is_podcast
         
     if update.account_id is not None:
-        try:
-            acc_url = f"{SUPABASE_URL}/rest/v1/accounts?select=name,niche&id=eq.{update.account_id}"
-            headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-            async with httpx.AsyncClient() as client:
-                acc_resp = await client.get(acc_url, headers=headers)
-                if acc_resp.status_code == 200:
-                    acc_json = acc_resp.json()
-                    if acc_json:
-                        handle = acc_json[0].get("name")
-                        niche = acc_json[0].get("niche")
-                        data["instagram_handle"] = handle
-                        data["niche_name"] = niche
-        except: pass
+        acc = get_account_by_id(update.account_id)
+        if acc:
+            data["instagram_handle"] = acc.get("name")
+            data["niche_name"] = acc.get("niche")
+        
+        '''
+        # (Supabase code commented out)
+        '''
 
     with open(target_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -931,28 +928,22 @@ async def get_transcript_version(version: str, request: Request):
         # Enrich with account handle and niche name if account_id exists
         account_id = data.get("account_id")
         if account_id:
-            try:
-                # Fetch handle and niche dynamically from DB
-                acc_url = f"{SUPABASE_URL}/rest/v1/accounts?select=name,niche&id=eq.{account_id}"
-                headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-                async with httpx.AsyncClient() as client:
-                    acc_resp = await client.get(acc_url, headers=headers)
-                    if acc_resp.status_code == 200:
-                        acc_data = acc_resp.json()
-                        if acc_data:
-                            data["instagram_handle"] = acc_data[0].get("name")
-                            data["niche_name"] = acc_data[0].get("niche")
-                            
-                            # PERSIST back to disk so Remotion sees it next time
-                            with open(target_path, "w", encoding="utf-8") as f:
-                                json.dump(data, f, ensure_ascii=False, indent=2)
-                                
-                            # Sync to all consumers for immediate consistency
-                            shutil.copy(target_path, os.path.join(REMOTION_DIR, "src", "transcript_data.json"))
-                            shutil.copy(target_path, os.path.join(BASE_DIR, "frontend", "src", "remotion", "transcript_data.json"))
-                            
-            except Exception as e:
-                print(f"[ERROR] Failed to fetch account handle/niche: {e}")
+            acc = get_account_by_id(account_id)
+            if acc:
+                data["instagram_handle"] = acc.get("name")
+                data["niche_name"] = acc.get("niche")
+                
+                # PERSIST back to disk so Remotion sees it next time
+                with open(target_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                    
+                # Sync to all consumers for immediate consistency
+                shutil.copy(target_path, os.path.join(REMOTION_DIR, "src", "transcript_data.json"))
+                shutil.copy(target_path, os.path.join(BASE_DIR, "frontend", "src", "remotion", "transcript_data.json"))
+            
+            '''
+            # ... (Supabase code commented out)
+            '''
 
         return data
     raise HTTPException(status_code=404, detail="Transcript not found")
@@ -1041,16 +1032,14 @@ def do_render_queue(version_id, clip_indices, preferredLanguage='es'):
                 # Enrich clip_data with real branding handle and niche if account_id is present
                 account_id = manifest.get("account_id")
                 if account_id:
-                    try:
-                        acc_url = f"{SUPABASE_URL}/rest/v1/accounts?select=name,niche&id=eq.{account_id}"
-                        headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-                        acc_resp = httpx.get(acc_url, headers=headers)
-                        if acc_resp.status_code == 200:
-                            acc_data = acc_resp.json()
-                            if acc_data:
-                                clip_data["instagram_handle"] = acc_data[0].get("name")
-                                clip_data["niche_name"] = acc_data[0].get("niche")
-                    except: pass
+                    acc = get_account_by_id(account_id)
+                    if acc:
+                        clip_data["instagram_handle"] = acc.get("name")
+                        clip_data["niche_name"] = acc.get("niche")
+                    
+                    '''
+                    # ... (Supabase code commented out)
+                    '''
 
                 # 1. Save modified Transcript to Remotion src
                 with open(os.path.join(REMOTION_DIR, "src", "transcript_data.json"), "w", encoding="utf-8") as f:
@@ -1067,10 +1056,6 @@ def do_render_queue(version_id, clip_indices, preferredLanguage='es'):
                     log_file.write(f"[RENDER] ERROR: {msg}\n")
                     continue
 
-                # 1. Save modified Transcript to Remotion src
-                with open(os.path.join(REMOTION_DIR, "src", "transcript_data.json"), "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                
                 # 2. Media to Remotion public
                 remotion_public = os.path.join(REMOTION_DIR, "public")
                 shutil.copy(v_path, os.path.join(remotion_public, v_name))
