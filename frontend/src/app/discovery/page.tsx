@@ -156,7 +156,8 @@ export default function DiscoveryPage() {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        url: candidate.original_url
+                        url: candidate.original_url,
+                        niche: candidate.niche
                     })
                 });
 
@@ -285,7 +286,7 @@ export default function DiscoveryPage() {
                                 </div>
                                 <button
                                     onClick={() => setNicheFilter(null)}
-                                    className={`px-5 py-2 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all
+                                    className={`px-5 py-2 rounded-full text-[10px] font-black tracking-widest border transition-all
                                         ${!nicheFilter
                                             ? 'bg-white text-black border-white shadow-[0_0_15px_rgba(255,255,255,0.1)]'
                                             : 'bg-transparent text-neutral-500 border-white/10 hover:border-white/20 hover:text-white'}`}
@@ -294,16 +295,17 @@ export default function DiscoveryPage() {
                                 </button>
                                 {uniqueNiches.map(niche => {
                                     const count = candidates.filter(c => c.niche === niche).length;
+                                    const label = niche.charAt(0).toUpperCase() + niche.slice(1).toLowerCase();
                                     return (
                                         <button
                                             key={niche}
                                             onClick={() => setNicheFilter(niche)}
-                                            className={`px-5 py-2 rounded-full text-[10px] font-black uppercase tracking-widest border transition-all
+                                            className={`px-5 py-2 rounded-full text-[10px] font-black tracking-widest border transition-all
                                                 ${nicheFilter === niche
-                                                    ? 'bg-white text-black border-white shadow-[0_0_15px_rgba(255,255,255,0.1)]'
+                                                    ? 'bg-white text-black border-white shadow-[0_0_25px_rgba(255,255,255,0.15)]'
                                                     : 'bg-transparent text-neutral-500 border-white/10 hover:border-white/20 hover:text-white'}`}
                                         >
-                                            {niche} ({count})
+                                            {label} ({count})
                                         </button>
                                     );
                                 })}
@@ -322,8 +324,8 @@ export default function DiscoveryPage() {
                                         className="group bg-[#0a0a0a] border border-white/5 rounded-[2.5rem] p-8 hover:border-white/10 transition-all duration-500 relative overflow-hidden"
                                     >
                                         <div className="flex justify-between items-start mb-6">
-                                            <span className="bg-white/5 text-neutral-400 text-[10px] font-black tracking-widest uppercase px-4 py-1.5 rounded-full border border-white/5">
-                                                {c.niche}
+                                            <span className="bg-white/5 text-neutral-400 text-[10px] font-black tracking-widest px-4 py-1.5 rounded-full border border-white/5">
+                                                {c.niche.charAt(0).toUpperCase() + c.niche.slice(1).toLowerCase()}
                                             </span>
                                             <div className="flex items-center gap-1.5 text-neutral-500 group-hover:text-white transition-colors">
                                                 <Flame className="w-4 h-4" />
@@ -372,6 +374,6 @@ export default function DiscoveryPage() {
                     </div>
                 )}
             </div>
-        </div>
+        </div >
     );
 }

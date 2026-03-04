@@ -1064,6 +1064,7 @@ if __name__ == "__main__":
     parser.add_argument("--version", help="Version identifier (timestamp)")
     parser.add_argument("--user_id", help="User ID owner of this process")
     parser.add_argument("--title", help="Video title for folder naming")
+    parser.add_argument("--niche", help="Specified niche for the project")
     
     args = parser.parse_known_args()[0]
     
@@ -1071,6 +1072,7 @@ if __name__ == "__main__":
     version = args.version or str(int(time.time()))
     user_id = args.user_id
     title = args.title
+    initial_niche = args.niche
 
     # Define project directory structure with readable folder name
     folder_name = f"{slugify(title)}_{version}" if title else version
@@ -1213,12 +1215,25 @@ if __name__ == "__main__":
             "video_title": video_title,
             "account_id": selected_account_id,
             "is_podcast": is_podcast_global,
+            "niche_name": initial_niche,
             # For backward compatibility, keep top clip markers at root
             "words": processed_clips[0]["words"],
             "words_es": processed_clips[0]["words_es"],
             "video_url": processed_clips[0]["video_url"],
             "audio_url": processed_clips[0]["audio_url"]
         }
+
+        # If we have an account_id detected or a niche provided, enrich the manifest
+        if final_data["account_id"]:
+            # Try to get niche details
+            accounts = get_supabase_accounts(user_id)
+            acc = next((a for a in accounts if str(a['id']) == str(final_data["account_id"])), None)
+            if acc:
+                final_data["instagram_handle"] = acc.get("name")
+                final_data["niche_name"] = acc.get("niche")
+        elif initial_niche:
+            # If no account detected but niche specified, use it
+            final_data["niche_name"] = initial_niche
         
         with open(TRANSCRIPT_FILE, "w", encoding="utf-8") as f:
             json.dump(final_data, f, ensure_ascii=False, indent=2)

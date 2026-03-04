@@ -26,7 +26,8 @@ import {
     LogOut,
     Sparkles,
     Trash2,
-    X
+    X,
+    Globe
 } from 'lucide-react';
 import Link from 'next/link';
 import { createClientComponentClient } from '@supabase/auth-helpers-nextjs';
@@ -54,6 +55,8 @@ export default function Home() {
     const [activeUrl, setActiveUrl] = useState<string | null>(null);
     const [currentVersion, setCurrentVersion] = useState<string | null>(null);
     const [accounts, setAccounts] = useState<any[]>([]);
+    const [nicheFilter, setNicheFilter] = useState<string | null>(null);
+    const [selectedNiche, setSelectedNiche] = useState<string>('');
     const [isEditingMetadata, setIsEditingMetadata] = useState(false);
     const [isLaunching, setIsLaunching] = useState(false);
     const processingRef = useRef<string | null>(null);
@@ -213,7 +216,10 @@ export default function Home() {
 
             const res = await authFetch(`${API_BASE}/api/process`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url: url.trim() })
+                body: JSON.stringify({
+                    url: url.trim(),
+                    niche: selectedNiche || undefined
+                })
             });
             const data = await res.json();
 
@@ -320,6 +326,29 @@ export default function Home() {
         } catch (err) { console.error("Metadata update failed", err); }
     };
 
+    const togglePublished = async (clipIdx: number) => {
+        if (!transcript?.version || !transcript.clips) return;
+        try {
+            const isCurrentlyPublished = !!transcript.clips[clipIdx].published;
+            const res = await authFetch(`${API_BASE}/api/update-published`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    version: transcript.version,
+                    clip_index: clipIdx,
+                    published: !isCurrentlyPublished
+                })
+            });
+            const result = await res.json();
+            if (result.status === 'success') {
+                const newClips = [...transcript.clips];
+                newClips[clipIdx] = { ...newClips[clipIdx], published: result.published };
+                setTranscript({ ...transcript, clips: newClips });
+                fetchProjects(); // Para refrescar contadores en dashboard
+            }
+        } catch (err) { console.error("Published toggle failed", err); }
+    };
+
     const handleRender = async (clipIdx?: number) => {
         if (!transcript?.version) {
             setAlert({ msg: "No version found to render", type: 'error' });
@@ -404,7 +433,7 @@ export default function Home() {
                             <span className="text-[11px] font-bold text-white/90">
                                 {accounts.find(a => a.id === transcript?.account_id)?.niche || 'General'}
                                 <span className="mx-2 text-white/20">|</span>
-                                <span className="text-purple-400">@{accounts.find(a => a.id === transcript?.account_id)?.name || 'rocotoclip'}</span>
+                                <span className="text-white">@{accounts.find(a => a.id === transcript?.account_id)?.name || 'rocotoclip'}</span>
                             </span>
                         </div>
                         <button
@@ -425,7 +454,7 @@ export default function Home() {
                                                 updateMetadata({ account_id: acc.id });
                                                 setIsEditingMetadata(false);
                                             }}
-                                            className={`flex flex-col items-start px-3 py-2 rounded-xl transition-all cursor-pointer ${transcript?.account_id === acc.id ? 'bg-purple-600/20 border border-purple-500/30' : 'hover:bg-white/5 border border-transparent'}`}
+                                            className={`flex flex-col items-start px-3 py-2 rounded-xl transition-all cursor-pointer ${transcript?.account_id === acc.id ? 'bg-white/10 border border-white/20' : 'hover:bg-white/5 border border-transparent'}`}
                                         >
                                             <span className="text-xs font-bold text-white">{acc.niche}</span>
                                             <span className="text-[10px] text-neutral-500">@{acc.name}</span>
@@ -439,7 +468,7 @@ export default function Home() {
                 <button
                     onClick={() => handleRender()}
                     disabled={selectedForRender.length === 0}
-                    className="px-6 py-2 bg-purple-600 hover:bg-purple-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl disabled:opacity-30 transition-all shadow-[0_0_20px_rgba(147,51,234,0.3)] cursor-pointer">
+                    className="px-6 py-2 bg-white hover:bg-neutral-200 text-black text-[10px] font-black uppercase tracking-widest rounded-xl disabled:opacity-30 transition-all shadow-[0_0_20px_rgba(255,255,255,0.1)] cursor-pointer">
                     Render Selected ({selectedForRender.length})
                 </button>
             </div>
@@ -476,15 +505,27 @@ export default function Home() {
                                         <div className="flex items-center gap-4">
                                             <label className="relative flex cursor-pointer items-center justify-center p-2 group">
                                                 <input type="checkbox" className="peer sr-only" checked={isSelected} onChange={toggleSelect} />
-                                                <div className="w-6 h-6 rounded-md border-2 border-white/20 peer-checked:bg-purple-600 peer-checked:border-purple-600 transition-all flex items-center justify-center group-hover:border-purple-500">
-                                                    {isSelected && <Check className="w-4 h-4 text-white" />}
+                                                <div className="w-6 h-6 rounded-md border-2 border-white/20 peer-checked:bg-white peer-checked:border-white transition-all flex items-center justify-center group-hover:border-white/40">
+                                                    {isSelected && <Check className="w-4 h-4 text-black" />}
                                                 </div>
                                             </label>
                                             <h3 className="text-sm font-bold truncate max-w-[500px] text-white/90">{clip.title || `Segment #${idx + 1}`}</h3>
                                         </div>
-                                        <button onClick={() => { setSelectedClipIdx(idx); setView('editor'); }} className="w-10 h-10 flex items-center justify-center bg-white text-black hover:bg-neutral-200 rounded-xl transition-transform hover:scale-105 shadow-xl cursor-pointer">
-                                            <Edit2 className="w-4 h-4" />
-                                        </button>
+                                        <div className="flex items-center gap-3">
+                                            <button
+                                                onClick={(e) => { e.stopPropagation(); togglePublished(idx); }}
+                                                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-[9px] font-black uppercase transition-all border 
+                                                    ${clip.published
+                                                        ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+                                                        : 'bg-white/5 border-white/10 text-neutral-500 hover:text-white hover:bg-white/10'}`}
+                                            >
+                                                <Globe className="w-3 h-3" />
+                                                {clip.published ? 'Publicado' : 'Pendiente'}
+                                            </button>
+                                            <button onClick={() => { setSelectedClipIdx(idx); setView('editor'); }} className="w-10 h-10 flex items-center justify-center bg-white text-black hover:bg-neutral-200 rounded-xl transition-transform hover:scale-105 shadow-xl cursor-pointer">
+                                                <Edit2 className="w-4 h-4" />
+                                            </button>
+                                        </div>
                                     </div>
 
                                     <div className="flex bg-[#050505] p-6 gap-8">
@@ -539,7 +580,7 @@ export default function Home() {
     );
 
     const dashboardView = (
-        <main className="min-h-screen bg-black text-white font-sans flex flex-col items-center justify-center p-8 transition-all duration-700">
+        <main className="min-h-screen bg-black text-white font-sans flex flex-col items-center p-8 transition-all duration-700 pt-32">
 
             {/* SOBER HEADER INTEGRATION */}
             <header className="fixed top-0 left-0 w-full border-b border-white/5 px-12 py-6 flex justify-between items-center bg-black/50 backdrop-blur-md z-[60]">
@@ -561,10 +602,6 @@ export default function Home() {
                 </button>
             </header>
 
-            {/* BRANDING */}
-            <div className="mb-12 flex flex-col items-center mt-20">
-                <h1 className="text-5xl font-bold tracking-tighter uppercase text-white select-none">RocotoClip</h1>
-            </div>
 
             {/* INPUT AREA */}
             <div className="w-full max-w-2xl relative z-10">
@@ -584,13 +621,21 @@ export default function Home() {
                     </div>
 
                     <div className="flex items-center justify-between px-8 py-6 border-t border-white/5 bg-black/40 rounded-b-[2.3rem]">
-                        <div className="flex gap-6">
+                        <div className="flex gap-6 items-center">
                             <Link href="/discovery" className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-neutral-500 hover:text-white transition-all cursor-pointer">
                                 <Sparkles className="w-4 h-4" /> Discovery
                             </Link>
-                            <button className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-neutral-500 hover:text-white transition-all cursor-pointer">
-                                <Cloud className="w-4 h-4" /> Cloud Sync
-                            </button>
+                            <div className="h-4 w-px bg-white/5" />
+                            <select
+                                value={selectedNiche}
+                                onChange={(e) => setSelectedNiche(e.target.value)}
+                                className="bg-transparent border-none text-[10px] font-black uppercase tracking-widest outline-none hover:text-white transition-all cursor-pointer text-neutral-500"
+                            >
+                                <option value="" className="bg-[#0a0a0a]">Categorizar</option>
+                                {Array.from(new Set(accounts.map(a => a.niche).filter(Boolean))).map(n => (
+                                    <option key={n} value={n} className="bg-[#0a0a0a]">{n}</option>
+                                ))}
+                            </select>
                         </div>
 
                         <button
@@ -631,79 +676,127 @@ export default function Home() {
                 )}
             </div>
 
-            <div className="mt-20 w-full max-w-5xl grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 animate-in fade-in slide-in-from-bottom-8 duration-700">
-                {Array.isArray(projects) && projects.map((proj) => {
-                    const isProcessing = proj.isActive;
-                    const isFailed = proj.status === 'failed';
+            {/* PROJECT LIST HEADER & FILTER */}
+            <div className="mt-20 w-full max-w-5xl flex flex-col gap-8 animate-in fade-in slide-in-from-bottom-8 duration-700">
+                <div className="flex items-center justify-between border-b border-white/5 pb-6">
+                    <div className="flex items-center gap-4">
+                        <h2 className="text-sm font-black uppercase tracking-widest text-neutral-500">Mis Proyectos</h2>
+                        <span className="bg-white/5 px-3 py-1 rounded-lg text-[10px] font-bold text-neutral-400 border border-white/5">
+                            {projects.length}
+                        </span>
+                    </div>
 
-                    return (
-                        <div
-                            key={proj.version}
-                            onClick={() => !isProcessing && !isFailed && loadProject(proj.version)}
-                            className={`relative group h-48 rounded-[2rem] border overflow-hidden p-8 flex flex-col justify-end transition-all cursor-pointer 
-                ${isProcessing ? 'border-sky-500/50 bg-sky-950/20 cursor-wait' :
-                                    isFailed ? 'border-red-500/20 bg-red-950/10 cursor-default' :
-                                        'border-white/5 bg-neutral-900/50 hover:border-white/20 hover:scale-[1.02]'}`}
+                    {/* Dynamic Niche Filter */}
+                    <div className="flex items-center gap-3 overflow-x-auto no-scrollbar max-w-[60%] py-1">
+                        <button
+                            onClick={() => setNicheFilter(null)}
+                            className={`px-4 py-2 rounded-xl text-[10px] font-black capitalize tracking-widest transition-all cursor-pointer border
+                                ${!nicheFilter ? 'bg-white text-black border-white shadow-[0_0_20px_rgba(255,255,255,0.1)]' : 'bg-transparent text-neutral-500 border-white/5 hover:border-white/10 hover:text-white'}`}
                         >
-                            <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent z-10" />
+                            Todos
+                        </button>
+                        {Array.from(new Set(projects.map(p => p.niche).filter(Boolean))).map(niche => (
+                            <button
+                                key={niche}
+                                onClick={() => setNicheFilter(niche)}
+                                className={`px-4 py-2 rounded-xl text-[10px] font-black tracking-widest transition-all cursor-pointer border whitespace-nowrap
+                                    ${nicheFilter === niche ? 'bg-white text-black border-white shadow-[0_0_20px_rgba(255,255,255,0.1)]' : 'bg-transparent text-neutral-500 border-white/5 hover:border-white/10 hover:text-white'}`}
+                            >
+                                {niche.charAt(0).toUpperCase() + niche.slice(1).toLowerCase()}
+                            </button>
+                        ))}
+                    </div>
+                </div>
 
-                            {!isProcessing && (
-                                <button
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        if (isFailed) {
-                                            handleDeleteProject(proj.version);
-                                        } else {
-                                            setShowDeleteModal(proj.version);
-                                        }
-                                    }}
-                                    className="absolute top-6 right-6 z-30 p-2.5 bg-black/80 hover:bg-neutral-800 text-white rounded-full opacity-0 group-hover:opacity-100 transition-all scale-75 group-hover:scale-100 shadow-2xl"
-                                >
-                                    {isFailed ? <X className="w-4 h-4" /> : <Trash2 className="w-4 h-4" />}
-                                </button>
-                            )}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {Array.isArray(projects) && projects.filter(p => !nicheFilter || p.niche === nicheFilter).map((proj) => {
+                        const isProcessing = proj.isActive;
+                        const isFailed = proj.status === 'failed';
 
-                            <div className="absolute inset-0 flex items-center justify-center opacity-[0.03] z-0">
-                                <Youtube className={`w-32 h-32 ${isProcessing ? 'animate-pulse text-sky-400' : ''}`} />
-                            </div>
+                        return (
+                            <div
+                                key={proj.version}
+                                onClick={() => !isProcessing && !isFailed && loadProject(proj.version)}
+                                className={`relative group h-48 rounded-[2rem] border overflow-hidden p-8 flex flex-col justify-end transition-all cursor-pointer 
+                ${isProcessing ? 'border-sky-500/50 bg-sky-950/20 cursor-wait' :
+                                        isFailed ? 'border-red-500/20 bg-red-950/10 cursor-default' :
+                                            'border-white/5 bg-neutral-900/50 hover:border-white/20 hover:scale-[1.02]'}`}
+                            >
+                                <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent z-10" />
 
-                            <div className="relative z-20">
-                                <div className="flex flex-col gap-1 mb-3">
-                                    <p className="text-base font-bold truncate text-white">
-                                        {proj.title || "Project " + proj.version}
-                                    </p>
-                                    <h4 className="text-[10px] font-black uppercase tracking-widest text-amber-500/60 flex justify-between items-center">
-                                        <span>{new Date(proj.timestamp * 1000).toLocaleDateString()} • {new Date(proj.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}</span>
-                                        {isProcessing && (
-                                            <span className={`${proj.status === 'queued' ? 'bg-amber-500' : 'bg-sky-500'} text-white px-2 py-0.5 rounded-full animate-pulse text-[8px] tracking-tight`}>
-                                                {proj.status === 'queued' ? 'EN COLA' : 'EN PROCESO'}
-                                            </span>
-                                        )}
-                                        {isFailed && <span className="bg-red-500/80 text-white px-2 py-0.5 rounded-full text-[8px] tracking-tight font-black">ERROR</span>}
-                                    </h4>
+                                {!isProcessing && (
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (isFailed) {
+                                                handleDeleteProject(proj.version);
+                                            } else {
+                                                setShowDeleteModal(proj.version);
+                                            }
+                                        }}
+                                        className="absolute top-6 right-6 z-30 p-2.5 bg-black/80 hover:bg-neutral-800 text-white rounded-full opacity-0 group-hover:opacity-100 transition-all scale-75 group-hover:scale-100 shadow-2xl"
+                                    >
+                                        {isFailed ? <X className="w-4 h-4" /> : <Trash2 className="w-4 h-4" />}
+                                    </button>
+                                )}
+
+                                <div className="absolute inset-0 flex items-center justify-center opacity-[0.03] z-0">
+                                    <Youtube className={`w-32 h-32 ${isProcessing ? 'animate-pulse text-sky-400' : ''}`} />
                                 </div>
 
-                                {isProcessing && proj.status !== 'queued' && (
-                                    <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden mt-2">
-                                        <div
-                                            className="h-full bg-sky-500 transition-all duration-500"
-                                            style={{ width: `${proj.progress}%` }}
-                                        />
+                                <div className="relative z-20">
+                                    <div className="flex flex-col gap-1 mb-3">
+                                        <p className="text-base font-bold truncate text-white">
+                                            {proj.title || "Project " + proj.version}
+                                        </p>
+                                        <h4 className="text-[10px] font-black uppercase tracking-widest text-neutral-500 flex flex-col gap-2">
+                                            <div className="flex justify-between items-center">
+                                                <span>{new Date(proj.timestamp * 1000).toLocaleDateString()} • {new Date(proj.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}</span>
+                                                {proj.status === 'completed' && proj.total_clips > 0 && (
+                                                    <span className="text-[9px] font-bold text-neutral-400">
+                                                        {proj.published_count}/{proj.total_clips} publicados
+                                                    </span>
+                                                )}
+                                                {isProcessing && (
+                                                    <span className={`${proj.status === 'queued' ? 'bg-amber-500' : 'bg-sky-500'} text-white px-2 py-0.5 rounded-full animate-pulse text-[8px] tracking-tight`}>
+                                                        {proj.status === 'queued' ? 'EN COLA' : 'EN PROCESO'}
+                                                    </span>
+                                                )}
+                                                {isFailed && <span className="bg-red-500/80 text-white px-2 py-0.5 rounded-full text-[8px] tracking-tight font-black">ERROR</span>}
+                                            </div>
+                                            <div className="flex">
+                                                <span className="bg-white/5 text-white/80 border border-white/10 px-2 py-1 rounded-lg text-[9px] font-black tracking-tighter">
+                                                    {(() => {
+                                                        const n = proj.niche || 'General';
+                                                        return n.charAt(0).toUpperCase() + n.slice(1).toLowerCase();
+                                                    })()}
+                                                </span>
+                                            </div>
+                                        </h4>
+                                    </div>
+
+                                    {isProcessing && proj.status !== 'queued' && (
+                                        <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden mt-2">
+                                            <div
+                                                className="h-full bg-sky-500 transition-all duration-500"
+                                                style={{ width: `${proj.progress}%` }}
+                                            />
+                                        </div>
+                                    )}
+                                    {isProcessing && proj.status === 'queued' && (
+                                        <p className="text-[10px] font-medium text-neutral-500 mt-2 uppercase tracking-tight">Esperando turno...</p>
+                                    )}
+                                </div>
+
+                                {!isProcessing && !isFailed && (
+                                    <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20 p-5 bg-white/10 backdrop-blur-md rounded-full shadow-2xl opacity-0 group-hover:opacity-100 transition-all scale-50 group-hover:scale-100 cursor-pointer">
+                                        <Play className="w-6 h-6 fill-white" />
                                     </div>
                                 )}
-                                {isProcessing && proj.status === 'queued' && (
-                                    <p className="text-[10px] font-medium text-neutral-500 mt-2 uppercase tracking-tight">Esperando turno...</p>
-                                )}
                             </div>
-
-                            {!isProcessing && !isFailed && (
-                                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20 p-5 bg-white/10 backdrop-blur-md rounded-full shadow-2xl opacity-0 group-hover:opacity-100 transition-all scale-50 group-hover:scale-100 cursor-pointer">
-                                    <Play className="w-6 h-6 fill-white" />
-                                </div>
-                            )}
-                        </div>
-                    );
-                })}
+                        );
+                    })}
+                </div>
             </div>
 
             {showDeleteModal && (
@@ -812,11 +905,11 @@ export default function Home() {
                                 <div className="w-full text-center text-[8px] text-neutral-700 tracking-widest font-bold uppercase">Base Video Layer</div>
                             </div>
 
-                            <div className="h-10 w-full bg-purple-900/10 rounded-md border border-purple-500/10 flex items-center px-8 relative shrink-0">
-                                <Zap className="w-3 h-3 text-purple-600 absolute left-2" />
+                            <div className="h-10 w-full bg-white/5 rounded-md border border-white/10 flex items-center px-8 relative shrink-0">
+                                <Zap className="w-3 h-3 text-white absolute left-2" />
                                 <div className="flex gap-2 w-full max-w-full overflow-x-auto custom-scrollbar items-center">
                                     {(transcript?.clips?.[selectedClipIdx]?.edit_events?.icons || transcript?.edit_events?.icons || []).map((icon: any, idx: number) => (
-                                        <div key={idx} className="flex items-center gap-2 bg-purple-500/20 px-3 py-1 rounded-md text-[10px] font-black uppercase text-purple-300 border border-purple-500/30 whitespace-nowrap">
+                                        <div key={idx} className="flex items-center gap-2 bg-white/10 px-3 py-1 rounded-md text-[10px] font-black uppercase text-white border border-white/20 whitespace-nowrap">
                                             <span>{icon.keyword} ({parseFloat(icon.time).toFixed(1)}s)</span>
                                             <button onClick={(e) => { e.stopPropagation(); removeEmoji(idx); }} className="p-0.5 hover:bg-black/50 rounded-full text-red-400 opacity-50 hover:opacity-100 transition-opacity cursor-pointer">
                                                 <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
@@ -837,6 +930,21 @@ export default function Home() {
 
                 <div className="w-[350px] bg-[#020202] py-8 pr-8 pl-8 overflow-y-auto flex flex-col gap-10 custom-scrollbar z-20">
                     <h2 className="text-xs font-black uppercase tracking-widest text-neutral-600 italic">Overrides & Control</h2>
+
+                    <section className="space-y-4">
+                        <div className="p-6 bg-[#0a0a0a] border border-white/5 rounded-2xl flex flex-col gap-4">
+                            <button
+                                onClick={() => togglePublished(selectedClipIdx)}
+                                className={`w-full py-4 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border flex items-center justify-center gap-2
+                                    ${transcript?.clips?.[selectedClipIdx]?.published
+                                        ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+                                        : 'bg-white/5 border-white/10 text-neutral-400 hover:text-white hover:border-white/20'}`}
+                            >
+                                <Globe className="w-4 h-4" />
+                                {transcript?.clips?.[selectedClipIdx]?.published ? 'Video publicado' : 'Marcar como publicado'}
+                            </button>
+                        </div>
+                    </section>
 
                     <section className="space-y-4">
                         <div className="flex items-center gap-2 text-[10px] font-black uppercase text-neutral-500 tracking-widest">

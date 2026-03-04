@@ -395,9 +395,10 @@ process_semaphore = threading.Semaphore(1) # Only process 1 video at a time for 
 class ProcessRequest(BaseModel):
     url: str
     user_id: Optional[str] = None
+    niche: Optional[str] = None
 
 class ProcessingState:
-    def __init__(self, url="", title="", user_id=None):
+    def __init__(self, url="", title="", user_id=None, niche=None):
         self.status = "queued" # queued, downloading, transcribing, analyzing, framing, completing, failed
         self.progress = 0
         self.message = "En cola de espera..."
@@ -407,6 +408,7 @@ class ProcessingState:
         self.version = None
         self.started_at = None
         self.user_id = user_id
+        self.niche = niche
         self.timestamp = time.time() # High-precision float for perfect ordering
 
     def to_dict(self):
@@ -421,16 +423,19 @@ class ProcessingState:
             "title": self.title,
             "version": str(self.version),
             "timestamp": self.timestamp,
-            "isActive": is_active
+            "isActive": is_active,
+            "niche": self.niche
         }
 
-def get_or_create_state(version_id, url="", user_id=None):
+def get_or_create_state(version_id, url="", user_id=None, niche=None):
     with processes_lock:
         if version_id not in active_processes:
-            active_processes[version_id] = ProcessingState(url=url, user_id=user_id)
+            active_processes[version_id] = ProcessingState(url=url, user_id=user_id, niche=niche)
         # Always ensure user_id is updated if we have a fresh one (resilience)
         if user_id:
             active_processes[version_id].user_id = user_id
+        if niche:
+            active_processes[version_id].niche = niche
         return active_processes[version_id]
 
 class RenderRequest(BaseModel):
@@ -452,9 +457,14 @@ class MetadataUpdate(BaseModel):
     account_id: Optional[int] = None
     is_podcast: Optional[bool] = None
 
-def run_pipeline(url: str, version: int):
+class PublishedToggle(BaseModel):
+    version: str
+    clip_index: int
+    published: bool
+
+def run_pipeline(url: str, version: int, niche: Optional[str] = None):
     # Use localized state for this process
-    state = get_or_create_state(version, url)
+    state = get_or_create_state(version, url, niche=niche)
     state.version = str(version)
     state.title = "Obteniendo información..."
     state.status = "queued"
@@ -488,6 +498,8 @@ def run_pipeline(url: str, version: int):
                     cmd.extend(["--user_id", str(state.user_id)])
                 if state.title and state.title != url:
                     cmd.extend(["--title", state.title])
+                if niche:
+                    cmd.extend(["--niche", niche])
                 
                 with open(log_filename, "w", encoding="utf-8") as log_file:
                     process = subprocess.Popen(
@@ -611,6 +623,43 @@ async def list_accounts(request: Request):
     # ... (Rest of Supabase code)
     '''
 
+
+@app.post("/api/update-published")
+async def update_published(update: PublishedToggle, request: Request):
+    """Update published status for a specific clip."""
+    user_id = await get_current_user(request)
+    
+    _proj_dir = find_project_dir(update.version)
+    target_path = os.path.join(_proj_dir, "transcript.json") if _proj_dir else None
+    if not target_path or not os.path.exists(target_path):
+        target_path = os.path.join(BASE_DIR, f"transcript_{update.version}.json")
+        
+    if not os.path.exists(target_path):
+        raise HTTPException(status_code=404, detail="Project not found")
+        
+    with open(target_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+        
+    if data.get("user_id") and data.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+        
+    clips = data.get("clips", [])
+    if update.clip_index < 0 or update.clip_index >= len(clips):
+        raise HTTPException(status_code=400, detail="Invalid clip index")
+        
+    clips[update.clip_index]["published"] = update.published
+    data["clips"] = clips
+    
+    with open(target_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        
+    # Sync to all consumers for consistency
+    shutil.copy(target_path, os.path.join(REMOTION_DIR, "src", "transcript_data.json"))
+    shutil.copy(target_path, os.path.join(BASE_DIR, "frontend", "src", "remotion", "transcript_data.json"))
+    shutil.copy(target_path, os.path.join(PUBLIC_DIR, f"transcript_{update.version}.json"))
+    
+    return {"status": "success", "published": update.published}
+
 @app.post("/api/update-metadata")
 async def update_metadata(update: MetadataUpdate, request: Request):
     """Update project-wide metadata like account_id or is_podcast."""
@@ -661,8 +710,8 @@ async def update_metadata(update: MetadataUpdate, request: Request):
         "data": {
             "account_id": data.get("account_id"), 
             "is_podcast": data.get("is_podcast"),
-            "instagram_handle": handle,
-            "niche_name": niche
+            "instagram_handle": data.get("instagram_handle"),
+            "niche_name": data.get("niche_name")
         }
     }
 
@@ -676,11 +725,11 @@ async def process_video(process_req: ProcessRequest, request: Request, backgroun
                 return {"message": "Project already being processed", "version": v, "isDuplicate": True}
 
     version = int(time.time())
-    state = get_or_create_state(version, process_req.url, user_id=user_id)
+    state = get_or_create_state(version, process_req.url, user_id=user_id, niche=process_req.niche)
     state.version = version
     state.user_id = user_id
     state.timestamp = version
-    background_tasks.add_task(run_pipeline, process_req.url, version)
+    background_tasks.add_task(run_pipeline, process_req.url, version, process_req.niche)
     return {"message": "Processing started", "version": version}
 
 @app.post("/api/reset")
@@ -815,12 +864,26 @@ async def list_projects(request: Request):
                     if data.get("user_id") != user_id:
                         continue
                         
+                    # Proactive Niche Recovery
+                    niche = data.get("niche_name") or data.get("niche")
+                    if not niche or niche == "General":
+                        # Try to find it in meta or handle-based logic if we wanted, 
+                        # but for now we look for 'niche_name' or 'niche'.
+                        niche = data.get("niche_name") or data.get("niche") or "General"
+
+                    clips = data.get("clips", [])
+                    total_clips = len(clips)
+                    published_clips = sum(1 for c in clips if c.get("published"))
+
                     projects.append({
                         "version": version,
-                        "title": data.get("video_title") or data.get("clips", [{}])[0].get("title", f"Project {version}"),
+                        "title": data.get("video_title") or (clips[0].get("title") if clips else f"Project {version}"),
                         "status": "completed", 
                         "timestamp": int(version) if version.isdigit() else 0,
-                        "isActive": False
+                        "isActive": False,
+                        "niche": niche,
+                        "published_count": published_clips,
+                        "total_clips": total_clips
                     })
                 except: continue
     except: pass
