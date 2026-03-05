@@ -122,7 +122,7 @@ export const Main: React.FC<MainProps> = ({
         ? transcript.audio_url
         : (transcript.audio_url ? staticFile(transcript.audio_url) : staticFile('output_vertical_clip.wav'));
 
-    const VideoLayer: React.FC<{ c: number, yOffset: number }> = ({ c, yOffset }) => {
+    const renderVideoLayer = (c: number, yOffset: number) => {
         const leftValue = calculateVideoTranslation(c);
         return (
             <VideoComp
@@ -141,7 +141,6 @@ export const Main: React.FC<MainProps> = ({
         );
     };
 
-
     const renderFinalComposition = () => (
         <AbsoluteFill style={{ backgroundColor: '#000' }}>
             <Audio src={audioSrc} />
@@ -150,16 +149,16 @@ export const Main: React.FC<MainProps> = ({
                     <AbsoluteFill>
                         {/* TOP SECTION */}
                         <div style={{ position: 'absolute', top: 0, width: '100%', height: '50%', overflow: 'hidden' }}>
-                            <VideoLayer c={centerTop} yOffset={verticalOffset} />
+                            {renderVideoLayer(centerTop, verticalOffset)}
                         </div>
                         {/* BOTTOM SECTION */}
                         <div style={{ position: 'absolute', bottom: 0, width: '100%', height: '50%', overflow: 'hidden', borderTop: '4px solid rgba(255,255,255,0.2)' }}>
-                            <VideoLayer c={centerBottom} yOffset={verticalOffset} />
+                            {renderVideoLayer(centerBottom, verticalOffset)}
                         </div>
                     </AbsoluteFill>
                 ) : (
                     <AbsoluteFill style={{ overflow: 'hidden' }}>
-                        <VideoLayer c={center} yOffset={verticalOffset} />
+                        {renderVideoLayer(center, verticalOffset)}
                     </AbsoluteFill>
                 )}
             </ZoomManager>
