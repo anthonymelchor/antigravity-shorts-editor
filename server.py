@@ -450,6 +450,9 @@ class FramingUpdate(BaseModel):
     center: float = None
     layout: str = None
     framing_segments: list = None
+    clip_index: Optional[int] = None
+    start: Optional[float] = None
+    end: Optional[float] = None
 
 class MetadataUpdate(BaseModel):
     version: str
@@ -599,9 +602,21 @@ async def update_framing(update: FramingUpdate, request: Request):
         if data.get("user_id") and data.get("user_id") != auth_user_id:
             raise HTTPException(status_code=403, detail="Unauthorized to update this transcript")
             
-        if update.center is not None: data["center"] = update.center
-        if update.layout is not None: data["layout"] = update.layout
-        if update.framing_segments is not None: data["framing_segments"] = update.framing_segments
+        if update.clip_index is not None:
+            clips = data.get("clips", [])
+            if 0 <= update.clip_index < len(clips):
+                clip = clips[update.clip_index]
+                if update.center is not None: clip["center"] = update.center
+                if update.layout is not None: clip["layout"] = update.layout
+                if update.framing_segments is not None: clip["framing_segments"] = update.framing_segments
+                if update.start is not None: clip["start"] = max(0.0, update.start)
+                if update.end is not None:
+                    clip["end"] = update.end
+                    clip["duration"] = max(0.1, update.end - clip.get("start", 0))
+        else:
+            if update.center is not None: data["center"] = update.center
+            if update.layout is not None: data["layout"] = update.layout
+            if update.framing_segments is not None: data["framing_segments"] = update.framing_segments
         
         with open(target_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)

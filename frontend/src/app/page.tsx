@@ -293,16 +293,31 @@ export default function Home() {
         try {
             if (!currentTranscript?.version) return;
 
+            let payload: any = {
+                version: currentTranscript.version,
+                user_id: '',
+                center: currentTranscript.center,
+                layout: currentTranscript.layout,
+                framing_segments: currentTranscript.framing_segments
+            };
+
+            if (selectedClipIdx !== null && currentTranscript.clips && currentTranscript.clips[selectedClipIdx]) {
+                const clip = currentTranscript.clips[selectedClipIdx];
+                payload = {
+                    ...payload,
+                    clip_index: selectedClipIdx,
+                    center: clip.center !== undefined ? clip.center : currentTranscript.center,
+                    layout: clip.layout !== undefined ? clip.layout : currentTranscript.layout,
+                    framing_segments: clip.framing_segments !== undefined ? clip.framing_segments : currentTranscript.framing_segments,
+                    start: clip.start,
+                    end: clip.end
+                };
+            }
+
             await authFetch(`${API_BASE}/api/update-framing`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    version: currentTranscript.version,
-                    user_id: '',  // Server extracts from token now
-                    center: currentTranscript.center,
-                    layout: currentTranscript.layout,
-                    framing_segments: currentTranscript.framing_segments
-                })
+                body: JSON.stringify(payload)
             });
         } catch (err) { console.error("Auto-save failed", err); }
     };
@@ -1046,11 +1061,17 @@ export default function Home() {
                         <div className="p-6 bg-[#0a0a0a] border border-white/5 rounded-2xl space-y-6">
                             <div className="flex justify-between items-end">
                                 <span className="text-[9px] uppercase font-bold text-neutral-500 tracking-widest">Offset X</span>
-                                <span className="text-lg font-black text-white">{((transcript?.center || 0.5) * 100).toFixed(0)}%</span>
+                                <span className="text-lg font-black text-white">{(((transcript?.clips?.[selectedClipIdx]?.center !== undefined ? transcript.clips[selectedClipIdx].center : transcript?.center) || 0.5) * 100).toFixed(0)}%</span>
                             </div>
-                            <input type="range" min="0" max="1" step="0.01" value={transcript?.center || 0.5}
+                            <input type="range" min="0" max="1" step="0.01" value={(transcript?.clips?.[selectedClipIdx]?.center !== undefined ? transcript.clips[selectedClipIdx].center : transcript?.center) || 0.5}
                                 onChange={(e) => {
-                                    const next = { ...transcript, center: parseFloat(e.target.value) };
+                                    const next = { ...transcript };
+                                    const val = parseFloat(e.target.value);
+                                    if (selectedClipIdx !== null && next.clips && next.clips[selectedClipIdx]) {
+                                        next.clips[selectedClipIdx].center = val;
+                                    } else {
+                                        next.center = val;
+                                    }
                                     setTranscript(next);
                                     saveChangesDebounced(next);
                                 }}
