@@ -65,6 +65,9 @@ export default function Home() {
     const versionRef = useRef<string | null>(null);
     const playerRef = useRef<PlayerRef>(null);
     const pendingDeletions = useRef<Set<string>>(new Set());
+    const playheadLineRef = useRef<HTMLDivElement>(null);
+    const playheadLabelRef = useRef<HTMLDivElement>(null);
+    const playheadInputRef = useRef<HTMLInputElement>(null);
 
     const router = useRouter();
     const supabase = createClientComponentClient();
@@ -168,25 +171,27 @@ export default function Home() {
         let animationFrameId: number;
 
         const updateFrame = () => {
-            if (playerRef.current) {
-                const frame = playerRef.current.getCurrentFrame();
-                const duration = transcript?.clips?.[selectedClipIdx]?.duration || 30;
-                const leftPct = ((frame / 30) / duration) * 100;
+            try {
+                if (playerRef.current) {
+                    const frame = playerRef.current.getCurrentFrame?.() || 0;
+                    const duration = transcript?.clips?.[selectedClipIdx]?.duration || 30;
+                    let leftPct = ((frame / 30) / duration) * 100;
+                    if (isNaN(leftPct) || !isFinite(leftPct)) leftPct = 0;
 
-                const playheadLine = document.getElementById('playhead-line');
-                if (playheadLine) {
-                    playheadLine.style.left = `${leftPct}%`;
-                }
+                    if (playheadLineRef.current) {
+                        playheadLineRef.current.style.left = `${leftPct}%`;
+                    }
 
-                const playheadLabel = document.getElementById('playhead-label');
-                if (playheadLabel) {
-                    playheadLabel.innerText = `${(frame / 30).toFixed(1)}s`;
-                }
+                    if (playheadLabelRef.current) {
+                        playheadLabelRef.current.innerText = `${(frame / 30).toFixed(1)}s`;
+                    }
 
-                const playheadInput = document.getElementById('playhead-input') as HTMLInputElement;
-                if (playheadInput) {
-                    playheadInput.value = (frame / 30).toString();
+                    if (playheadInputRef.current && document.activeElement !== playheadInputRef.current) {
+                        playheadInputRef.current.value = (frame / 30).toString();
+                    }
                 }
+            } catch (e) {
+                // Ignore errors from player not being fully ready
             }
             animationFrameId = requestAnimationFrame(updateFrame);
         };
@@ -1073,6 +1078,7 @@ export default function Home() {
                                 </div>
 
                                 <div
+                                    ref={playheadLineRef}
                                     id="playhead-line"
                                     className="absolute top-0 bottom-0 w-[1px] bg-red-500 z-20 pointer-events-none shadow-[0_0_10px_rgba(239,68,68,0.3)] transition-none"
                                     style={{
@@ -1083,13 +1089,14 @@ export default function Home() {
                                         <svg width="12" height="16" viewBox="0 0 12 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                                             <path d="M0 2C0 0.89543 0.89543 0 2 0H10C11.1046 0 12 0.89543 12 2V10L6 16L0 10V2Z" fill="#ef4444" />
                                         </svg>
-                                        <div id="playhead-label" className="text-[10px] text-red-500 font-bold mt-1 bg-black/50 px-1 rounded tabular-nums">
+                                        <div ref={playheadLabelRef} id="playhead-label" className="text-[10px] text-red-500 font-bold mt-1 bg-black/50 px-1 rounded tabular-nums">
                                             0.0s
                                         </div>
                                     </div>
                                 </div>
 
                                 <input
+                                    ref={playheadInputRef}
                                     id="playhead-input"
                                     type="range"
                                     min="0"
