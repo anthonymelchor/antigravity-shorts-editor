@@ -65,9 +65,6 @@ export default function Home() {
     const versionRef = useRef<string | null>(null);
     const playerRef = useRef<PlayerRef>(null);
     const pendingDeletions = useRef<Set<string>>(new Set());
-    const playheadLineRef = useRef<HTMLDivElement>(null);
-    const playheadLabelRef = useRef<HTMLDivElement>(null);
-    const playheadInputRef = useRef<HTMLInputElement>(null);
 
     const router = useRouter();
     const supabase = createClientComponentClient();
@@ -168,40 +165,28 @@ export default function Home() {
     }, [alert]);
 
     useEffect(() => {
-        let animationFrameId: number;
+        const player = playerRef.current;
+        if (!player || view !== 'results') return;
 
-        const updateFrame = () => {
-            try {
-                if (playerRef.current) {
-                    const frame = playerRef.current.getCurrentFrame?.() || 0;
-                    const duration = transcript?.clips?.[selectedClipIdx]?.duration || 30;
-                    let leftPct = ((frame / 30) / duration) * 100;
-                    if (isNaN(leftPct) || !isFinite(leftPct)) leftPct = 0;
+        const onFrameUpdate = (e: any) => {
+            const frame = e.frame;
+            const duration = transcript?.clips?.[selectedClipIdx]?.duration || 30;
+            let pct = ((frame / 30) / duration) * 100;
+            if (!isFinite(pct) || isNaN(pct)) pct = 0;
 
-                    if (playheadLineRef.current) {
-                        playheadLineRef.current.style.left = `${leftPct}%`;
-                    }
+            const line = document.getElementById('rct-playhead-line') as HTMLElement;
+            if (line) line.style.left = pct + '%';
 
-                    if (playheadLabelRef.current) {
-                        playheadLabelRef.current.innerText = `${(frame / 30).toFixed(1)}s`;
-                    }
+            const label = document.getElementById('rct-playhead-label') as HTMLElement;
+            if (label) label.textContent = (frame / 30).toFixed(1) + 's';
 
-                    if (playheadInputRef.current && document.activeElement !== playheadInputRef.current) {
-                        playheadInputRef.current.value = (frame / 30).toString();
-                    }
-                }
-            } catch (e) {
-                // Ignore errors from player not being fully ready
-            }
-            animationFrameId = requestAnimationFrame(updateFrame);
+            const inp = document.getElementById('rct-playhead-input') as HTMLInputElement;
+            if (inp && document.activeElement !== inp) inp.value = (frame / 30).toFixed(2);
         };
 
-        if (view === 'results') {
-            updateFrame();
-        }
-
-        return () => cancelAnimationFrame(animationFrameId);
-    }, [view, transcript, selectedClipIdx]);
+        player.addEventListener('frameupdate', onFrameUpdate);
+        return () => { player.removeEventListener('frameupdate', onFrameUpdate); };
+    }, [view, playerRef.current, transcript, selectedClipIdx]);
 
     useEffect(() => {
         let interval: NodeJS.Timeout;
@@ -1029,7 +1014,27 @@ export default function Home() {
                     <div className="flex-1 flex items-center justify-center min-h-0 p-8">
                         <div className="h-full aspect-[9/16] bg-black rounded-[2rem] overflow-hidden shadow-2xl border border-white/5">
                             <Player
-                                ref={playerRef}
+                                ref={(r) => {
+                                    (playerRef as any).current = r;
+                                    // Attach frameupdate listener as soon as the player ref is available
+                                    if (r) {
+                                        // Remove previous listener if any to avoid duplicates
+                                        r.removeEventListener('frameupdate', (r as any).__onFrameUpdate);
+                                        const handler = (e: any) => {
+                                            const frame = e.frame;
+                                            const clipEl = document.getElementById('rct-playhead-line') as HTMLElement;
+                                            const labelEl = document.getElementById('rct-playhead-label') as HTMLElement;
+                                            const inpEl = document.getElementById('rct-playhead-input') as HTMLInputElement;
+                                            const dur = Math.ceil((transcript?.clips?.[selectedClipIdx]?.duration || 30) * 30) || 1;
+                                            const pct = (frame / dur) * 100;
+                                            if (clipEl) clipEl.style.left = pct + '%';
+                                            if (labelEl) labelEl.textContent = (frame / 30).toFixed(1) + 's';
+                                            if (inpEl && document.activeElement !== inpEl) inpEl.value = (frame / 30).toFixed(2);
+                                        };
+                                        (r as any).__onFrameUpdate = handler;
+                                        r.addEventListener('frameupdate', handler);
+                                    }
+                                }}
                                 component={Main}
                                 durationInFrames={Math.ceil((transcript?.clips?.[selectedClipIdx]?.duration || 30) * 30)}
                                 compositionWidth={1080} compositionHeight={1920} fps={30}
@@ -1060,7 +1065,7 @@ export default function Home() {
                         </div>
 
                         <div className="flex-1 rounded-xl bg-[#050505] border border-white/5 relative overflow-x-auto overflow-y-hidden custom-scrollbar">
-                            <div style={{ minWidth: `${timelineZoom * 100}%` }} className="h-full relative flex flex-col justify-center pb-0 group">
+                            <div style={{ minWidth: `${timelineZoom * 100}%` }} className="h-full relative flex flex-col justify-end pb-4 group">
 
                                 <div className="h-8 w-full relative shrink-0">
                                     <div className="absolute inset-0 flex overflow-hidden opacity-90 transition-opacity">
@@ -1077,32 +1082,30 @@ export default function Home() {
                                     </div>
                                 </div>
 
-                                <div
-                                    ref={playheadLineRef}
-                                    id="playhead-line"
-                                    className="absolute top-0 bottom-0 w-[1px] bg-red-500 z-20 pointer-events-none shadow-[0_0_10px_rgba(239,68,68,0.3)] transition-none"
-                                    style={{
-                                        left: `0%`
-                                    }}
-                                >
-                                    <div className="absolute top-2 -translate-x-1/2 flex flex-col items-center">
-                                        <svg width="12" height="16" viewBox="0 0 12 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                            <path d="M0 2C0 0.89543 0.89543 0 2 0H10C11.1046 0 12 0.89543 12 2V10L6 16L0 10V2Z" fill="#ef4444" />
-                                        </svg>
-                                        <div ref={playheadLabelRef} id="playhead-label" className="text-[10px] text-red-500 font-bold mt-1 bg-black/50 px-1 rounded tabular-nums">
-                                            0.0s
+                                {(playerRef.current || currentFrame >= 0) && (
+                                    <div
+                                        className="absolute top-0 bottom-0 w-[1px] bg-red-500 z-20 pointer-events-none shadow-[0_0_10px_rgba(239,68,68,0.3)] transition-none"
+                                        style={{
+                                            left: `${((currentFrame / 30) / (transcript?.clips?.[selectedClipIdx]?.duration || 30)) * 100}%`
+                                        }}
+                                    >
+                                        <div className="absolute top-2 -translate-x-1/2 flex flex-col items-center">
+                                            <svg width="12" height="16" viewBox="0 0 12 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                                <path d="M0 2C0 0.89543 0.89543 0 2 0H10C11.1046 0 12 0.89543 12 2V10L6 16L0 10V2Z" fill="#ef4444" />
+                                            </svg>
+                                            <div className="text-[10px] text-red-500 font-bold mt-1 bg-black/50 px-1 rounded tabular-nums">
+                                                {(currentFrame / 30).toFixed(1)}s
+                                            </div>
                                         </div>
                                     </div>
-                                </div>
+                                )}
 
                                 <input
-                                    ref={playheadInputRef}
-                                    id="playhead-input"
                                     type="range"
                                     min="0"
                                     max={transcript?.clips?.[selectedClipIdx]?.duration || 30}
                                     step="0.01"
-                                    defaultValue={0}
+                                    value={currentFrame / 30}
                                     onChange={(e) => {
                                         const time = parseFloat(e.target.value);
                                         playerRef.current?.seekTo(Math.floor(time * 30));
