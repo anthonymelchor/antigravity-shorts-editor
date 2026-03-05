@@ -169,7 +169,24 @@ export default function Home() {
 
         const updateFrame = () => {
             if (playerRef.current) {
-                setCurrentFrame(playerRef.current.getCurrentFrame());
+                const frame = playerRef.current.getCurrentFrame();
+                const duration = transcript?.clips?.[selectedClipIdx]?.duration || 30;
+                const leftPct = ((frame / 30) / duration) * 100;
+
+                const playheadLine = document.getElementById('playhead-line');
+                if (playheadLine) {
+                    playheadLine.style.left = `${leftPct}%`;
+                }
+
+                const playheadLabel = document.getElementById('playhead-label');
+                if (playheadLabel) {
+                    playheadLabel.innerText = `${(frame / 30).toFixed(1)}s`;
+                }
+
+                const playheadInput = document.getElementById('playhead-input') as HTMLInputElement;
+                if (playheadInput) {
+                    playheadInput.value = (frame / 30).toString();
+                }
             }
             animationFrameId = requestAnimationFrame(updateFrame);
         };
@@ -179,7 +196,7 @@ export default function Home() {
         }
 
         return () => cancelAnimationFrame(animationFrameId);
-    }, [view]);
+    }, [view, transcript, selectedClipIdx]);
 
     useEffect(() => {
         let interval: NodeJS.Timeout;
@@ -1038,7 +1055,7 @@ export default function Home() {
                         </div>
 
                         <div className="flex-1 rounded-xl bg-[#050505] border border-white/5 relative overflow-x-auto overflow-y-hidden custom-scrollbar">
-                            <div style={{ minWidth: `${timelineZoom * 100}%` }} className="h-full relative flex flex-col justify-end pb-4 group">
+                            <div style={{ minWidth: `${timelineZoom * 100}%` }} className="h-full relative flex flex-col justify-center pb-0 group">
 
                                 <div className="h-8 w-full relative shrink-0">
                                     <div className="absolute inset-0 flex overflow-hidden opacity-90 transition-opacity">
@@ -1055,30 +1072,30 @@ export default function Home() {
                                     </div>
                                 </div>
 
-                                {(playerRef.current || currentFrame >= 0) && (
-                                    <div
-                                        className="absolute top-0 bottom-0 w-[1px] bg-red-500 z-20 pointer-events-none shadow-[0_0_10px_rgba(239,68,68,0.3)] transition-none"
-                                        style={{
-                                            left: `${((currentFrame / 30) / (transcript?.clips?.[selectedClipIdx]?.duration || 30)) * 100}%`
-                                        }}
-                                    >
-                                        <div className="absolute top-2 -translate-x-1/2 flex flex-col items-center">
-                                            <svg width="12" height="16" viewBox="0 0 12 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                                <path d="M0 2C0 0.89543 0.89543 0 2 0H10C11.1046 0 12 0.89543 12 2V10L6 16L0 10V2Z" fill="#ef4444" />
-                                            </svg>
-                                            <div className="text-[10px] text-red-500 font-bold mt-1 bg-black/50 px-1 rounded tabular-nums">
-                                                {(currentFrame / 30).toFixed(1)}s
-                                            </div>
+                                <div
+                                    id="playhead-line"
+                                    className="absolute top-0 bottom-0 w-[1px] bg-red-500 z-20 pointer-events-none shadow-[0_0_10px_rgba(239,68,68,0.3)] transition-none"
+                                    style={{
+                                        left: `0%`
+                                    }}
+                                >
+                                    <div className="absolute top-2 -translate-x-1/2 flex flex-col items-center">
+                                        <svg width="12" height="16" viewBox="0 0 12 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                            <path d="M0 2C0 0.89543 0.89543 0 2 0H10C11.1046 0 12 0.89543 12 2V10L6 16L0 10V2Z" fill="#ef4444" />
+                                        </svg>
+                                        <div id="playhead-label" className="text-[10px] text-red-500 font-bold mt-1 bg-black/50 px-1 rounded tabular-nums">
+                                            0.0s
                                         </div>
                                     </div>
-                                )}
+                                </div>
 
                                 <input
+                                    id="playhead-input"
                                     type="range"
                                     min="0"
                                     max={transcript?.clips?.[selectedClipIdx]?.duration || 30}
                                     step="0.01"
-                                    value={currentFrame / 30}
+                                    defaultValue={0}
                                     onChange={(e) => {
                                         const time = parseFloat(e.target.value);
                                         playerRef.current?.seekTo(Math.floor(time * 30));
