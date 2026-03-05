@@ -60,6 +60,7 @@ export default function Home() {
     const [isEditingMetadata, setIsEditingMetadata] = useState(false);
     const [isLaunching, setIsLaunching] = useState(false);
     const [currentFrame, setCurrentFrame] = useState(0);
+    const [timelineZoom, setTimelineZoom] = useState(1);
     const processingRef = useRef<string | null>(null);
     const versionRef = useRef<string | null>(null);
     const playerRef = useRef<PlayerRef>(null);
@@ -1023,54 +1024,67 @@ export default function Home() {
                         </div>
                     </div>
 
-                    <div className="h-56 bg-[#0a0a0a] border-t border-white/5 flex flex-col p-6 shadow-2xl z-10">
+                    <div className="h-64 bg-[#0a0a0a] border-t border-white/5 flex flex-col p-6 shadow-2xl z-10">
                         <div className="flex items-center justify-between mb-4">
                             <span className="text-[10px] uppercase tracking-widest font-black text-neutral-500 flex items-center gap-2">
                                 <Scissors className="w-3 h-3" /> Rocoto Timeline
                             </span>
-                            <div className="flex gap-4">
-                                <span className="text-[10px] text-neutral-600 font-bold">Start: {(transcript?.clips?.[selectedClipIdx]?.start || 0).toFixed(2)}s</span>
-                                <span className="text-[10px] text-neutral-600 font-bold">End: {(transcript?.clips?.[selectedClipIdx]?.end || transcript?.duration || 0).toFixed(2)}s</span>
+                            <div className="flex gap-6 items-center">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-[10px] text-neutral-600 font-bold">Zoom</span>
+                                    <input type="range" min="1" max="10" step="0.5" value={timelineZoom} onChange={(e) => setTimelineZoom(parseFloat(e.target.value))} className="w-24 accent-white h-1 bg-neutral-900 appearance-none rounded-full" />
+                                </div>
                             </div>
                         </div>
 
-                        <div className="flex-1 rounded-xl bg-black border border-white/5 relative overflow-x-auto overflow-y-hidden custom-scrollbar flex flex-col py-2 px-4 gap-2">
-                            <div className="h-6 w-full bg-white/5 rounded-md flex items-center px-4 relative shrink-0 group">
-                                <Layout className="w-3 h-3 text-neutral-600 absolute left-2 z-10" />
-                                <div className="absolute inset-0 left-8 flex overflow-hidden opacity-90 transition-opacity">
-                                    {(transcript?.clips?.[selectedClipIdx]?.framing_segments || [{ start: 0, end: transcript?.clips?.[selectedClipIdx]?.duration || 30, layout: transcript?.clips?.[selectedClipIdx]?.layout || 'single' }]).map((seg: any, idx: number) => {
-                                        const clipDur = transcript?.clips?.[selectedClipIdx]?.duration || 30;
-                                        const leftPct = (seg.start / clipDur) * 100;
-                                        const widthPct = ((Math.min(seg.end, clipDur) - seg.start) / clipDur) * 100;
-                                        return (
-                                            <div key={idx} style={{ left: `${leftPct}%`, width: `${widthPct}%` }} className={`absolute h-full border-r border-black text-[7px] font-black flex items-center justify-center uppercase tracking-widest ${seg.layout === 'split' ? 'bg-white text-black' : 'bg-neutral-800 text-neutral-400'}`}>
-                                                {seg.layout}
-                                            </div>
-                                        )
-                                    })}
-                                    {(playerRef.current || currentFrame >= 0) && (
-                                        <div
-                                            className="absolute top-0 bottom-0 w-[1px] bg-white z-20 pointer-events-none transition-all duration-75"
-                                            style={{
-                                                left: `${((currentFrame / 30) / (transcript?.clips?.[selectedClipIdx]?.duration || 30)) * 100}%`
-                                            }}
-                                        >
-                                            <div className="absolute -top-1.5 -translate-x-1/2 w-2 h-3 bg-white rounded-[1px] shadow-[0_0_10px_rgba(255,255,255,0.5)]" />
-                                        </div>
-                                    )}
-                                    <input
-                                        type="range"
-                                        min="0"
-                                        max={transcript?.clips?.[selectedClipIdx]?.duration || 30}
-                                        step="0.01"
-                                        value={currentFrame / 30}
-                                        onChange={(e) => {
-                                            const time = parseFloat(e.target.value);
-                                            playerRef.current?.seekTo(Math.floor(time * 30));
-                                        }}
-                                        className="absolute inset-x-0 inset-y-0 w-full h-full opacity-0 cursor-ew-resize z-30 m-0"
-                                    />
+                        <div className="flex-1 rounded-xl bg-[#050505] border border-white/5 relative overflow-x-auto overflow-y-hidden custom-scrollbar">
+                            <div style={{ minWidth: `${timelineZoom * 100}%` }} className="h-full relative flex flex-col justify-end pb-4 group">
+
+                                <div className="h-8 w-full relative shrink-0">
+                                    <div className="absolute inset-0 flex overflow-hidden opacity-90 transition-opacity">
+                                        {(transcript?.clips?.[selectedClipIdx]?.framing_segments || [{ start: 0, end: transcript?.clips?.[selectedClipIdx]?.duration || 30, layout: transcript?.clips?.[selectedClipIdx]?.layout || 'single' }]).map((seg: any, idx: number) => {
+                                            const clipDur = transcript?.clips?.[selectedClipIdx]?.duration || 30;
+                                            const leftPct = (seg.start / clipDur) * 100;
+                                            const widthPct = ((Math.min(seg.end, clipDur) - seg.start) / clipDur) * 100;
+                                            return (
+                                                <div key={idx} style={{ left: `${leftPct}%`, width: `${widthPct}%` }} className={`absolute h-full border-r border-[#050505] text-[8px] font-black flex items-center justify-center uppercase tracking-widest ${seg.layout === 'split' ? 'bg-white text-black' : 'bg-neutral-800 text-neutral-400'}`}>
+                                                    {seg.layout}
+                                                </div>
+                                            )
+                                        })}
+                                    </div>
                                 </div>
+
+                                {(playerRef.current || currentFrame >= 0) && (
+                                    <div
+                                        className="absolute top-0 bottom-0 w-[1px] bg-red-500 z-20 pointer-events-none shadow-[0_0_10px_rgba(239,68,68,0.3)] transition-none"
+                                        style={{
+                                            left: `${((currentFrame / 30) / (transcript?.clips?.[selectedClipIdx]?.duration || 30)) * 100}%`
+                                        }}
+                                    >
+                                        <div className="absolute top-2 -translate-x-1/2 flex flex-col items-center">
+                                            <svg width="12" height="16" viewBox="0 0 12 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                                <path d="M0 2C0 0.89543 0.89543 0 2 0H10C11.1046 0 12 0.89543 12 2V10L6 16L0 10V2Z" fill="#ef4444" />
+                                            </svg>
+                                            <div className="text-[10px] text-red-500 font-bold mt-1 bg-black/50 px-1 rounded tabular-nums">
+                                                {(currentFrame / 30).toFixed(1)}s
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                <input
+                                    type="range"
+                                    min="0"
+                                    max={transcript?.clips?.[selectedClipIdx]?.duration || 30}
+                                    step="0.01"
+                                    value={currentFrame / 30}
+                                    onChange={(e) => {
+                                        const time = parseFloat(e.target.value);
+                                        playerRef.current?.seekTo(Math.floor(time * 30));
+                                    }}
+                                    className="absolute inset-0 w-full h-full opacity-0 cursor-ew-resize z-30 m-0"
+                                />
                             </div>
                         </div>
                     </div>
