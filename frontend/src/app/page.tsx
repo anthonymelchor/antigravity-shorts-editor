@@ -59,6 +59,7 @@ export default function Home() {
     const [selectedNiche, setSelectedNiche] = useState<string>('');
     const [isEditingMetadata, setIsEditingMetadata] = useState(false);
     const [isLaunching, setIsLaunching] = useState(false);
+    const [currentFrame, setCurrentFrame] = useState(0);
     const processingRef = useRef<string | null>(null);
     const versionRef = useRef<string | null>(null);
     const playerRef = useRef<PlayerRef>(null);
@@ -161,6 +162,23 @@ export default function Home() {
             return () => clearTimeout(timer);
         }
     }, [alert]);
+
+    useEffect(() => {
+        let animationFrameId: number;
+
+        const updateFrame = () => {
+            if (playerRef.current) {
+                setCurrentFrame(playerRef.current.getCurrentFrame());
+            }
+            animationFrameId = requestAnimationFrame(updateFrame);
+        };
+
+        if (view === 'results') {
+            updateFrame();
+        }
+
+        return () => cancelAnimationFrame(animationFrameId);
+    }, [view]);
 
     useEffect(() => {
         let interval: NodeJS.Timeout;
@@ -483,6 +501,23 @@ export default function Home() {
             const currentVal = next.clips[selectedClipIdx][boundary] || 0;
             const newVal = Math.max(0, currentVal + amount);
             next.clips[selectedClipIdx][boundary] = newVal;
+
+            const newStart = next.clips[selectedClipIdx].start || 0;
+            const newEnd = next.clips[selectedClipIdx].end || 0;
+            next.clips[selectedClipIdx].duration = Math.max(0.1, newEnd - newStart);
+        }
+        setTranscript(next);
+        saveChangesDebounced(next);
+    };
+
+    const setClipBoundary = (boundary: 'start' | 'end', value: number) => {
+        if (selectedClipIdx === null) return;
+        const clip = transcript?.clips?.[selectedClipIdx];
+        if (!clip) return;
+
+        const next = { ...transcript };
+        if (next.clips && next.clips[selectedClipIdx]) {
+            next.clips[selectedClipIdx][boundary] = Math.max(0, value);
 
             const newStart = next.clips[selectedClipIdx].start || 0;
             const newEnd = next.clips[selectedClipIdx].end || 0;
@@ -1002,17 +1037,39 @@ export default function Home() {
                         <div className="flex-1 rounded-xl bg-black border border-white/5 relative overflow-x-auto overflow-y-hidden custom-scrollbar flex flex-col py-2 px-4 gap-2">
                             <div className="h-6 w-full bg-white/5 rounded-md flex items-center px-4 relative shrink-0 group">
                                 <Layout className="w-3 h-3 text-neutral-600 absolute left-2 z-10" />
-                                <div className="absolute inset-0 left-8 flex overflow-hidden opacity-70 group-hover:opacity-100 transition-opacity">
+                                <div className="absolute inset-0 left-8 flex overflow-hidden opacity-90 transition-opacity">
                                     {(transcript?.clips?.[selectedClipIdx]?.framing_segments || [{ start: 0, end: transcript?.clips?.[selectedClipIdx]?.duration || 30, layout: transcript?.clips?.[selectedClipIdx]?.layout || 'single' }]).map((seg: any, idx: number) => {
                                         const clipDur = transcript?.clips?.[selectedClipIdx]?.duration || 30;
                                         const leftPct = (seg.start / clipDur) * 100;
                                         const widthPct = ((Math.min(seg.end, clipDur) - seg.start) / clipDur) * 100;
                                         return (
-                                            <div key={idx} style={{ left: `${leftPct}%`, width: `${widthPct}%` }} className={`absolute h-full border-r border-black/50 text-[7px] font-black flex items-center justify-center uppercase tracking-widest ${seg.layout === 'split' ? 'bg-purple-500/40 text-purple-200' : 'bg-blue-500/40 text-blue-200'}`}>
+                                            <div key={idx} style={{ left: `${leftPct}%`, width: `${widthPct}%` }} className={`absolute h-full border-r border-black text-[7px] font-black flex items-center justify-center uppercase tracking-widest ${seg.layout === 'split' ? 'bg-white text-black' : 'bg-neutral-800 text-neutral-400'}`}>
                                                 {seg.layout}
                                             </div>
                                         )
                                     })}
+                                    {(playerRef.current || currentFrame >= 0) && (
+                                        <div
+                                            className="absolute top-0 bottom-0 w-[1px] bg-white z-20 pointer-events-none transition-all duration-75"
+                                            style={{
+                                                left: `${((currentFrame / 30) / (transcript?.clips?.[selectedClipIdx]?.duration || 30)) * 100}%`
+                                            }}
+                                        >
+                                            <div className="absolute -top-1.5 -translate-x-1/2 w-2 h-3 bg-white rounded-[1px] shadow-[0_0_10px_rgba(255,255,255,0.5)]" />
+                                        </div>
+                                    )}
+                                    <input
+                                        type="range"
+                                        min="0"
+                                        max={transcript?.clips?.[selectedClipIdx]?.duration || 30}
+                                        step="0.01"
+                                        value={currentFrame / 30}
+                                        onChange={(e) => {
+                                            const time = parseFloat(e.target.value);
+                                            playerRef.current?.seekTo(Math.floor(time * 30));
+                                        }}
+                                        className="absolute inset-x-0 inset-y-0 w-full h-full opacity-0 cursor-ew-resize z-30 m-0"
+                                    />
                                 </div>
                             </div>
                         </div>
@@ -1041,28 +1098,28 @@ export default function Home() {
                         <div className="flex items-center gap-2 text-[10px] font-black uppercase text-neutral-500 tracking-widest">
                             <Scissors className="w-3 h-3" /> Timeline Cuts
                         </div>
-                        <div className="p-6 bg-[#0a0a0a] border border-white/5 rounded-2xl flex flex-col gap-4">
-                            <div className="flex justify-between items-center text-xs text-neutral-400 font-bold">
-                                <span>Start:</span>
-                                <div className="flex gap-1 items-center">
-                                    <button onClick={() => adjustClipBoundary('start', -0.5)} className="px-2 py-1 bg-white/5 hover:bg-white/10 rounded cursor-pointer">-0.5s</button>
-                                    <span className="text-white bg-white/10 px-2 py-1 rounded w-14 text-center">
-                                        {(transcript?.clips?.[selectedClipIdx]?.start || 0).toFixed(2)}s
-                                    </span>
-                                    <button onClick={() => adjustClipBoundary('start', 0.5)} className="px-2 py-1 bg-white/5 hover:bg-white/10 rounded cursor-pointer">+0.5s</button>
+                        <div className="p-6 bg-[#0a0a0a] border border-white/5 rounded-2xl flex flex-col gap-6">
+                            <div className="flex flex-col gap-2">
+                                <div className="flex justify-between items-end">
+                                    <span className="text-[9px] uppercase font-bold text-neutral-500 tracking-widest">Start</span>
+                                    <span className="text-sm font-black text-white">{(transcript?.clips?.[selectedClipIdx]?.start || 0).toFixed(2)}s</span>
                                 </div>
-                            </div>
-                            <div className="flex justify-between items-center text-xs text-neutral-400 font-bold mt-2">
-                                <span>End:</span>
-                                <div className="flex gap-1 items-center">
-                                    <button onClick={() => adjustClipBoundary('end', -0.5)} className="px-2 py-1 bg-white/5 hover:bg-white/10 rounded cursor-pointer">-0.5s</button>
-                                    <span className="text-white bg-white/10 px-2 py-1 rounded w-14 text-center">
-                                        {(transcript?.clips?.[selectedClipIdx]?.end || transcript?.duration || 0).toFixed(2)}s
-                                    </span>
-                                    <button onClick={() => adjustClipBoundary('end', 0.5)} className="px-2 py-1 bg-white/5 hover:bg-white/10 rounded cursor-pointer">+0.5s</button>
-                                </div>
+                                <input type="range" min="0" max={transcript?.duration || 300} step="0.1"
+                                    value={transcript?.clips?.[selectedClipIdx]?.start || 0}
+                                    onChange={(e) => setClipBoundary('start', parseFloat(e.target.value))}
+                                    className="w-full accent-white h-2 bg-neutral-900 rounded-full appearance-none cursor-ew-resize" />
                             </div>
 
+                            <div className="flex flex-col gap-2">
+                                <div className="flex justify-between items-end">
+                                    <span className="text-[9px] uppercase font-bold text-neutral-500 tracking-widest">End</span>
+                                    <span className="text-sm font-black text-white">{(transcript?.clips?.[selectedClipIdx]?.end || transcript?.duration || 0).toFixed(2)}s</span>
+                                </div>
+                                <input type="range" min="0" max={transcript?.duration || 300} step="0.1"
+                                    value={transcript?.clips?.[selectedClipIdx]?.end || transcript?.duration || 0}
+                                    onChange={(e) => setClipBoundary('end', parseFloat(e.target.value))}
+                                    className="w-full accent-white h-2 bg-neutral-900 rounded-full appearance-none cursor-ew-resize" />
+                            </div>
                             <div className="flex flex-col gap-2 mt-4 pt-4 border-t border-white/5">
                                 <div className="text-[10px] text-neutral-500 font-bold uppercase tracking-widest text-center mb-1">Cortes desde el segundo actual</div>
                                 <button onClick={() => addFramingCut('single')} className="w-full py-3 border border-blue-500/20 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all cursor-pointer">
