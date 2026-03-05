@@ -427,9 +427,30 @@ export default function Home() {
         const currentTimeMs = currentFrame / 30; // in seconds
 
         const newSegments = [];
-        for (let seg of segments) {
-            if (currentTimeMs > seg.start && currentTimeMs < seg.end) {
-                // Split logic
+        let deletedCut = false;
+
+        // Tolerance for deleting a cut (within 0.3 seconds of boundary)
+        const DELETE_TOLERANCE = 0.3;
+
+        for (let i = 0; i < segments.length; i++) {
+            const seg = segments[i];
+
+            // If playhead is right on the boundary between this segment and the next one
+            if (i < segments.length - 1 && Math.abs(currentTimeMs - seg.end) < DELETE_TOLERANCE) {
+                // Merge this segment with the next one
+                const nextSeg = segments[i + 1];
+                newSegments.push({
+                    ...seg,
+                    end: nextSeg.end,
+                    // Keep layout of the first segment
+                });
+                i++; // Skip next segment since we merged it
+                deletedCut = true;
+                continue;
+            }
+
+            // Normal cut logic
+            if (!deletedCut && currentTimeMs > seg.start && currentTimeMs < seg.end) {
                 newSegments.push({ ...seg, end: currentTimeMs });
                 newSegments.push({ ...seg, start: currentTimeMs, layout: layoutToApply });
             } else {
@@ -448,7 +469,7 @@ export default function Home() {
         saveChangesDebounced(next);
 
         // Let's trigger a toast message to let the user know their cut was successful
-        setAlert({ msg: `Corte añadido: a partir de ahora es ${layoutToApply === 'single' ? 'vertical (single)' : 'horizontal (split)'}`, type: 'warning' });
+        setAlert({ msg: deletedCut ? "Corte eliminado y fusionado" : `Corte añadido: a partir de ahora es ${layoutToApply === 'single' ? 'vertical (single)' : 'horizontal (split)'}`, type: 'warning' });
         setTimeout(() => setAlert(null), 3000);
     };
 
