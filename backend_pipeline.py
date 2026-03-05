@@ -6,6 +6,9 @@ import re
 import requests
 import logging
 import yt_dlp
+import numpy as np
+import cv2
+import mediapipe as mp
 from faster_whisper import WhisperModel
 from google import genai
 from google.genai import types
@@ -681,205 +684,146 @@ def _extract_split_candidates(people, faces, w_f):
     return True, c_left, c_right
 
 
-    return True, c_left, c_right
 
 
 def analyze_framing_high_precision_local(video_path, start_time, end_time, is_podcast=True):
-    """Refactored Scene-Based Framing for high precision and scalability using MediaPipe (LOCAL)."""
-    logger.info(f"Starting Local HIGH-PRECISION Framing Analysis (MediaPipe) [is_podcast={is_podcast}]...")
-    try:
-        import cv2
-        import mediapipe as mp
-    except ImportError:
-        return {"layout": "single", "center": 0.5, "framing_segments": [{"start": 0, "end": end_time - start_time, "center": 0.5, "layout": "single"}]}
-
+    """
+    Motor de Framing Profesional (Shot-Based Decision).
+    1. Detecta cortes de cámara exactos usando diferencias de luminancia (Matemática pura).
+    2. Analiza un frame representativo por cada toma (escena) con IA.
+    3. Bloquea el layout para toda la toma (Estabilidad total, cero parpadeo).
+    """
+    import mediapipe as mp
+    
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    
+    # Configurar detectores MediaPipe (Una sola vez)
     model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "efficientdet_lite0.tflite")
-    detector_options = mp.tasks.vision.ObjectDetectorOptions(
+    face_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blaze_face_short_range.tflite")
+    
+    from mediapipe.tasks.python import vision
+    det_options = vision.ObjectDetectorOptions(
         base_options=mp.tasks.BaseOptions(model_asset_path=model_path),
         score_threshold=0.3
     )
-    
-    face_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blaze_face_short_range.tflite")
-    face_options = mp.tasks.vision.FaceDetectorOptions(
+    face_options = vision.FaceDetectorOptions(
         base_options=mp.tasks.BaseOptions(model_asset_path=face_model_path),
         min_detection_confidence=0.4
     )
 
-    cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    start_frame = int(start_time * fps)
+    total_frames_to_read = int((end_time - start_time) * fps)
     
-    total_frames = int((end_time - start_time) * fps)
+    # --- FASE 1: Detección Matemática de Cortes de Cámara ---
+    # Escaneamos rápido buscando el frame EXACTO del cambio de plano.
+    logger.info(f"Fase 1: Detectando cortes de cámara exactos en {total_frames_to_read} frames...")
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    
+    cuts = [0] # Frame relativo al inicio del clip
+    last_gray = None
+    
+    # Parámetros de sensibilidad para cortes
+    CUT_SENSITIVITY = 0.15 # Más bajo = más sensible a cambios de cámara sutiles
+    MIN_SCENE_FRAMES = int(fps * 0.5) # Mínimo 0.5s por toma para evitar parpadeo
+    
+    for i in range(total_frames_to_read):
+        ret, frame = cap.read()
+        if not ret: break
+        
+        # Convertir a escala de grises pequeña para comparar rápido
+        small = cv2.resize(frame, (64, 36))
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype('float32') / 255.0
+        
+        if last_gray is not None:
+            # Diferencia absoluta media entre frames
+            diff = float(np.abs(gray - last_gray).mean())
+            if diff > CUT_SENSITIVITY:
+                # Evitar cortes demasiado seguidos si no es necesario
+                if len(cuts) == 0 or (i - cuts[-1]) > MIN_SCENE_FRAMES:
+                    cuts.append(i) # Guardamos el frame exacto del corte
+        
+        last_gray = gray
+    
+    cuts.append(total_frames_to_read)
+    logger.info(f"  Fase 1 completa: {len(cuts)-1} tomas detectadas.")
 
-    # --- PERFORMANCE OPTIMIZATION CONFIG ---
-    # REVERT INSTRUCTIONS:
-    # 🚨 To return to original high-precision (slower but processes every frame):
-    # 1. Set FRAME_SKIP_RATE = 1
-    # 2. Set INTERNAL_ANALYSIS_WIDTH = None
+    # --- FASE 2: Análisis de IA por Toma (Lock-In) ---
+    # Para cada toma, decidimos el layout basándonos en el frame central.
+    logger.info("Fase 2: Aplicando decisiones por toma y analizando con IA...")
+    final_segments = []
     
-    # [FRAME_SKIP_RATE]
-    # Analyzes 1 out of every N frames. Value of 5 = 5x speed boost in analysis.
-    FRAME_SKIP_RATE = 5 
-    
-    # [INTERNAL_ANALYSIS_WIDTH]
-    # Resizes the frame internally for AI processing (Human eye doesn't see this).
-    # Since we use normalized coordinates (0.0 to 1.0), the center remains 
-    # mathematically identical whether we analyze at 480px or 1080px.
-    # Result: Massive CPU relief with zero quality loss in the final output.
-    INTERNAL_ANALYSIS_WIDTH = 480 
-    # ----------------------------------------
-
-    segments = []
-    last_hsv_hist = None
-    
-    # 1. FRAME-BY-FRAME SCENE DETECTION (Super Fast)
-    logger.info(f"Scanning {total_frames} frames for hard cuts and analyzing actors (Skip: {FRAME_SKIP_RATE}, Resize: {INTERNAL_ANALYSIS_WIDTH})...")
-    
-    with mp.tasks.vision.ObjectDetector.create_from_options(detector_options) as detector, \
-         mp.tasks.vision.FaceDetector.create_from_options(face_options) as face_detector:
-        for frame_idx in range(0, total_frames, FRAME_SKIP_RATE):
-            # Jump forward if skip is enabled
-            if FRAME_SKIP_RATE > 1:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, (start_time * fps) + frame_idx)
-
+    with vision.ObjectDetector.create_from_options(det_options) as detector, \
+         vision.FaceDetector.create_from_options(face_options) as face_detector:
+        
+        for j in range(len(cuts) - 1):
+            s_frame = cuts[j]
+            e_frame = cuts[j+1]
+            if (e_frame - s_frame) < 2: continue # Ignorar micro-escenas
+            
+            # Tomamos el frame central de esta toma para decidir el layout
+            mid_frame = s_frame + (e_frame - s_frame) // 2
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame + mid_frame)
             ret, frame = cap.read()
-            if not ret: break
+            if not ret: continue
             
-            # Histogram comparison
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            hist = cv2.calcHist([hsv], [0, 1], None, [180, 256], [0, 180, 0, 256])
-            cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+            # Análisis con MediaPipe
+            h_f, w_f = frame.shape[:2]
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
             
-            is_hard_cut = False
-            if last_hsv_hist is not None:
-                correlation = cv2.compareHist(last_hsv_hist, hist, cv2.HISTCMP_CORREL)
-                if correlation < 0.85: # Hard switch detected
-                    is_hard_cut = True
+            p_res = detector.detect(mp_image)
+            f_res = face_detector.detect(mp_image)
             
-            # Analyze ONLY if it's the first frame of a scene or we need a sample
-            if frame_idx == 0 or is_hard_cut:
-                if segments:
-                    segments[-1]["end"] = frame_idx / fps
-                
-                # RUN AI ONLY HERE
-                # Performance Patch: Downscale for AI detection
-                analysis_frame = frame
-                if INTERNAL_ANALYSIS_WIDTH and frame.shape[1] > INTERNAL_ANALYSIS_WIDTH:
-                    scale = INTERNAL_ANALYSIS_WIDTH / frame.shape[1]
-                    h_target = int(frame.shape[0] * scale)
-                    analysis_frame = cv2.resize(frame, (INTERNAL_ANALYSIS_WIDTH, h_target))
-
-                rgb_frame = cv2.cvtColor(analysis_frame, cv2.COLOR_BGR2RGB)
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-                
-                # Use frames shape for dimensions (Crucial for correct normalization)
-                h_f, w_f = analysis_frame.shape[:2]
-                
-                # Run detectors
-                person_results = detector.detect(mp_image)
-                face_results = face_detector.detect(mp_image)
-                
-                people = [d for d in person_results.detections if d.categories[0].category_name == 'person']
-                faces = face_results.detections
-                
-                layout = "single"
-                center = 0.5
-                center_top = 0.5
-                center_bottom = 0.5
-
-                # --- NEW REFINED LOGIC (Cross-Validation) ---
-                if len(people) >= 2:
-                    if is_podcast:
-                        layout = "split"
-                        p_sorted = sorted(people, key=lambda d: d.bounding_box.origin_x)
-                        p1_x = (p_sorted[0].bounding_box.origin_x + p_sorted[0].bounding_box.width/2) / w_f
-                        p2_x = (p_sorted[1].bounding_box.origin_x + p_sorted[1].bounding_box.width/2) / w_f
-                        center_top = p1_x
-                        center_bottom = p2_x
-                        center = p1_x
-                    else:
-                        layout = "single"
-                        # Centrar en la persona más prominente (mayor área)
-                        best_p = max(people, key=lambda d: d.bounding_box.width * d.bounding_box.height)
-                        center = (best_p.bounding_box.origin_x + best_p.bounding_box.width/2) / w_f
-                elif len(people) == 1:
-                    layout = "single"
-                    p_center = (people[0].bounding_box.origin_x + people[0].bounding_box.width/2) / w_f
-                    if len(faces) >= 1:
-                        face_best = min(faces, key=lambda f: abs(((f.bounding_box.origin_x + f.bounding_box.width/2)/w_f) - p_center))
-                        center = (face_best.bounding_box.origin_x + face_best.bounding_box.width/2) / w_f
-                    else:
-                        center = p_center
-                elif len(faces) >= 1:
-                    if len(faces) >= 2 and is_podcast:
-                        layout = "split"
-                        f_sorted = sorted(faces, key=lambda f: f.bounding_box.origin_x)
-                        center_top = (f_sorted[0].bounding_box.origin_x + f_sorted[0].bounding_box.width/2) / w_f
-                        center_bottom = (f_sorted[1].bounding_box.origin_x + f_sorted[1].bounding_box.width/2) / w_f
-                        center = center_top
-                    else:
-                        layout = "single"
-                        center = (faces[0].bounding_box.origin_x + faces[0].bounding_box.width/2) / w_f
-
-                segments.append({
-                    "start": frame_idx / fps,
-                    "end": (frame_idx + FRAME_SKIP_RATE) / fps,
-                    "layout": layout,
-                    "center": center,
-                    "center_top": center_top,
-                    "center_bottom": center_bottom
-                })
-                
-                if is_hard_cut:
-                    logger.info(f"  [Cut] Detected at {(start_time + frame_idx/fps):.3f}s. Layout: {layout} | Center: {center:.2f}")
-
-            else:
-                # Just extend current segment
-                segments[-1]["end"] = (frame_idx + FRAME_SKIP_RATE) / fps
-                
-            last_hsv_hist = hist
+            people = [d for d in p_res.detections if d.categories[0].category_name == 'person']
+            faces = f_res.detections
+            
+            layout = "single"
+            center = 0.5
+            center_top = 0.5
+            center_bottom = 0.5
+            
+            # Lógica de decisión Profesional (Podcast-First)
+            # Priorizamos caras si hay 2, o personas si hay 2.
+            if len(people) >= 2 or (len(faces) >= 2 and is_podcast):
+                layout = "split"
+                actors = sorted(people if len(people) >= 2 else faces, key=lambda d: d.bounding_box.origin_x)
+                center_top = (actors[0].bounding_box.origin_x + actors[0].bounding_box.width/2) / w_f
+                center_bottom = (actors[-1].bounding_box.origin_x + actors[-1].bounding_box.width/2) / w_f
+                center = center_top
+            elif len(people) == 1 or len(faces) == 1:
+                target = people[0] if len(people) == 1 else faces[0]
+                center = (target.bounding_box.origin_x + target.bounding_box.width/2) / w_f
+            
+            # Asegurar límites
+            center = max(0.1, min(0.9, center))
+            center_top = max(0.1, min(0.9, center_top))
+            center_bottom = max(0.1, min(0.9, center_bottom))
+            
+            # Creamos el segmento estable para TODA la toma
+            final_segments.append({
+                "start": s_frame / fps,
+                "end": e_frame / fps,
+                "layout": layout,
+                "center": center,
+                "center_top": center_top,
+                "center_bottom": center_bottom
+            })
 
     cap.release()
     
-    if not segments:
-        segments.append({"start": 0.0, "end": end_time - start_time, "center": 0.5, "layout": "single"})
-    else:
-        # --- SMART SEGMENT MERGING (PRO VERSION) ---
-        # Reduce timeline noise by merging visually similar segments
-        merged = []
-        if segments:
-            current = segments[0]
-            for i in range(1, len(segments)):
-                next_seg = segments[i]
-                
-                # Conditions for merging:
-                # 1. Same layout (single == single)
-                # 2. Similar centering (less than 10% difference)
-                layout_same = next_seg["layout"] == current["layout"]
-                center_similar = abs(next_seg["center"] - current["center"]) < 0.10
-                
-                # If it's a split, check both centers
-                if current["layout"] == "split":
-                    ct_same = abs(next_seg["center_top"] - current["center_top"]) < 0.10
-                    cb_same = abs(next_seg["center_bottom"] - current["center_bottom"]) < 0.10
-                    center_similar = ct_same and cb_same
+    # --- FASE 3: Limpieza y Retorno ---
+    if not final_segments:
+        final_segments.append({"start": 0.0, "end": end_time - start_time, "layout": "single", "center": 0.5})
 
-                if layout_same and center_similar:
-                    # Extend current segment instead of creating a new one
-                    current["end"] = next_seg["end"]
-                else:
-                    merged.append(current)
-                    current = next_seg
-            merged.append(current)
-            segments = merged
-    
-    logger.info(f"High-Precision Analysis Complete. Identified {len(segments)} clean segments after merging.")
+    logger.info(f"Proceso completado. {len(final_segments)} segmentos estables generados.")
     return {
-        "layout": segments[0]["layout"], 
-        "center": segments[0]["center"], 
-        "center_top": segments[0].get("center_top", 0.5),
-        "center_bottom": segments[0].get("center_bottom", 0.5),
-        "framing_segments": segments,
-        "reasoning": f"Scene-First Framer ({len(segments)} cuts found)"
+        "layout": final_segments[0]["layout"],
+        "center": final_segments[0]["center"],
+        "center_top": final_segments[0].get("center_top", 0.5),
+        "center_bottom": final_segments[0].get("center_bottom", 0.5),
+        "framing_segments": final_segments,
+        "reasoning": f"Shot-Based Stabilization ({len(final_segments)} scenes)"
     }
 
 def analyze_framing_multimodal_vision_gemini(video_path, start_time, end_time):
@@ -1087,7 +1031,22 @@ if __name__ == "__main__":
     TRANSCRIPT_FILE = os.path.join(PROJECT_DIR, "transcript.json")
 
     try:
+        # --- START OF PIPELINE LOGGER BANNER ---
+        logger.info("")
+        logger.info("╔══════════════════════════════════════════════════════════════════════════╗")
+        logger.info("║                    🚀 ANTIGRAVITY SHORTS PIPELINE v3.5                   ║")
+        logger.info("╚══════════════════════════════════════════════════════════════════════════╝")
+        logger.info(f"   🎥 VIDEO: {title or 'Unknown'}")
+        logger.info(f"   🔗 LINK : {youtube_url or 'Local File'}")
+        logger.info(f"   🆔 USER : {user_id}")
+        logger.info(f"   🏷️ NICHE: {initial_niche or 'Generic'}")
+        logger.info("   ──────────────────────────────────────────────────────────────────")
+        logger.info("")
+
+        global_start = time.time()
+
         # 1. Download (Always download if URL provided)
+        t_start = time.time()
         if youtube_url:
             video_file = download_video(youtube_url, INPUT_FILE)
         elif os.path.exists("input_full.mp4"):
@@ -1097,28 +1056,28 @@ if __name__ == "__main__":
             # Fallback default
             youtube_url = "https://www.youtube.com/watch?v=okL1xL_hHOw"
             video_file = download_video(youtube_url, INPUT_FILE)
+        logger.info(f"   ✅ [PHASE 1] Download completed in {time.time() - t_start:.2f}s")
         
-        # 1.5 Create lightweight proxy for framing analysis (ONE time)
-        PROXY_FILE = os.path.join(PROJECT_DIR, "proxy.mp4")
-        logger.info(f"Creating 480p proxy for framing analysis...")
-        proxy_cmd = [
-            "ffmpeg", "-y", "-i", video_file,
-            "-vf", "scale=-2:480",
-            "-c:v", "libx264", "-crf", "28", "-preset", "veryfast",
-            "-an",  # No audio needed for visual analysis
-            PROXY_FILE
-        ]
-        subprocess.run(proxy_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        logger.info(f"Proxy created: {PROXY_FILE}")
+        # 1.5 NOTE: No proxy needed — analyze_framing_high_precision_local already
+        # downscales internally to INTERNAL_ANALYSIS_WIDTH (480px). Using a pre-scaled
+        # proxy caused FPS mismatches and wrong frame timestamps vs the original file.
+        # The validate_universal_fix.py approach (using the original video directly) is correct.
+        logger.info(f"   ✅ [PHASE 1.5] Skipping proxy — framing will use original video directly (480px internal downscale)")
         
         # 2. Transcribe
+        t_start = time.time()
         transcript = transcribe_audio(video_file)
+        logger.info(f"   ✅ [PHASE 2] Transcription completed in {time.time() - t_start:.2f}s")
             
         # 2.5 GLOBAL TRANSLATION (Scaling improvement)
+        t_start = time.time()
         full_translated_words = translate_full_transcript_global(transcript['segments'])
+        logger.info(f"   ✅ [PHASE 2.5] Global Translation completed in {time.time() - t_start:.2f}s")
 
         # 3. Analyze Transcript with Gemini (New v3.0 logic with context and account detection)
+        t_start = time.time()
         analysis_result = analyze_with_gemini(transcript, user_id=user_id)
+        logger.info(f"   ✅ [PHASE 3] Gemini Viral Analysis completed in {time.time() - t_start:.2f}s")
         
         context = analysis_result.get("context", {})
         raw_clips = analysis_result.get("clips", [])
@@ -1167,8 +1126,12 @@ if __name__ == "__main__":
                 if w['end'] > start_time and w['start'] < end_time
             ]
             
-            # 3.8 Intelligent Framing (uses lightweight proxy for speed, same normalized coords)
-            framing_data = analyze_framing_high_precision_local(PROXY_FILE, start_time, end_time, is_podcast=is_podcast_global)
+            # 3.8 Intelligent Framing (uses original video with internal 480px downscale for speed)
+            # CRITICAL: Using the original video (not a proxy) ensures correct FPS and frame timestamps.
+            # This matches the validate_universal_fix.py approach which produced perfect results.
+            t_frame = time.time()
+            framing_data = analyze_framing_high_precision_local(video_file, start_time, end_time, is_podcast=is_podcast_global)
+            logger.info(f"      🎞️ Framing analysis completed in {time.time() - t_frame:.2f}s")
             
             # 3.85 Process B-roll Suggestions and Adjust Times
             edit_events = analysis.get("edit_events", {"zooms": [], "icons": [], "b_rolls": [], "backgrounds": []})
@@ -1196,7 +1159,9 @@ if __name__ == "__main__":
             }
             
             # 4. Crop and Cut the physical clip
+            t_clip = time.time()
             process_video_ffmpeg(video_file, V_OUT, start_time, end_time, A_OUT)
+            logger.info(f"      ✂️ Clip extraction completed in {time.time() - t_clip:.2f}s")
             
             processed_clips.append(clip_data)
 
@@ -1241,7 +1206,12 @@ if __name__ == "__main__":
         # SECURITY: Removed global transcript_data.json write.
         # Each user's data stays isolated in transcript_{version}.json only.
 
-        logger.info(f"Backend processing pipeline complete! Version: {version} (Generated {len(processed_clips)} clips)")
+        logger.info("")
+        logger.info("   🏁 PIPELINE FINISHED SUCCESSFULY")
+        logger.info(f"   ⏱️ TOTAL TIME: {time.time() - global_start:.2f}s")
+        logger.info("   ──────────────────────────────────────────────────────────────────")
+        logger.info("")
+
         # Force flush log
         for l in logger.handlers:
             l.flush()
