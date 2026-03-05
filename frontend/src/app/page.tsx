@@ -164,29 +164,55 @@ export default function Home() {
         }
     }, [alert]);
 
+    // Track playhead by polling every animation frame. 
+    // We try 3 sources in order: <video> element, playerRef.getCurrentFrame(), nothing.
     useEffect(() => {
-        const player = playerRef.current;
-        if (!player || view !== 'results') return;
+        if (view !== 'results') return;
+        let rafId: number;
+        let lastVal = -1;
 
-        const onFrameUpdate = (e: any) => {
-            const frame = e.frame;
-            const duration = transcript?.clips?.[selectedClipIdx]?.duration || 30;
-            let pct = ((frame / 30) / duration) * 100;
-            if (!isFinite(pct) || isNaN(pct)) pct = 0;
+        const tick = () => {
+            let timeSec = -1;
+            let durationSec = 1;
 
-            const line = document.getElementById('rct-playhead-line') as HTMLElement;
-            if (line) line.style.left = pct + '%';
+            // Source 1: actual <video> element (most reliable when Remotion uses video)
+            const videoEl = document.querySelector('video') as HTMLVideoElement | null;
+            if (videoEl && isFinite(videoEl.duration) && videoEl.duration > 0) {
+                timeSec = videoEl.currentTime;
+                durationSec = videoEl.duration;
+            }
 
-            const label = document.getElementById('rct-playhead-label') as HTMLElement;
-            if (label) label.textContent = (frame / 30).toFixed(1) + 's';
+            // Source 2: playerRef.getCurrentFrame() (works when Remotion renders frames as canvas)
+            if (timeSec < 0 && playerRef.current) {
+                try {
+                    const f = (playerRef.current as any).getCurrentFrame?.();
+                    if (typeof f === 'number') {
+                        timeSec = f / 30;
+                        durationSec = (transcript?.clips?.[selectedClipIdx]?.duration) || 30;
+                    }
+                } catch (_) { }
+            }
 
-            const inp = document.getElementById('rct-playhead-input') as HTMLInputElement;
-            if (inp && document.activeElement !== inp) inp.value = (frame / 30).toFixed(2);
+            if (timeSec >= 0 && Math.abs(timeSec - lastVal) > 0.01) {
+                lastVal = timeSec;
+                const pct = Math.min(100, (timeSec / durationSec) * 100);
+
+                const lineEl = document.getElementById('rct-playhead-line');
+                if (lineEl) (lineEl as HTMLElement).style.left = pct + '%';
+
+                const labelEl = document.getElementById('rct-playhead-label');
+                if (labelEl) (labelEl as HTMLElement).textContent = timeSec.toFixed(1) + 's';
+
+                const inpEl = document.getElementById('rct-playhead-input') as HTMLInputElement | null;
+                if (inpEl && document.activeElement !== inpEl) inpEl.value = timeSec.toFixed(2);
+            }
+
+            rafId = requestAnimationFrame(tick);
         };
 
-        player.addEventListener('frameupdate', onFrameUpdate);
-        return () => { player.removeEventListener('frameupdate', onFrameUpdate); };
-    }, [view, playerRef.current, transcript, selectedClipIdx]);
+        rafId = requestAnimationFrame(tick);
+        return () => cancelAnimationFrame(rafId);
+    }, [view, transcript, selectedClipIdx]);
 
     useEffect(() => {
         let interval: NodeJS.Timeout;
@@ -1014,27 +1040,7 @@ export default function Home() {
                     <div className="flex-1 flex items-center justify-center min-h-0 p-8">
                         <div className="h-full aspect-[9/16] bg-black rounded-[2rem] overflow-hidden shadow-2xl border border-white/5">
                             <Player
-                                ref={(r) => {
-                                    (playerRef as any).current = r;
-                                    // Attach frameupdate listener as soon as the player ref is available
-                                    if (r) {
-                                        // Remove previous listener if any to avoid duplicates
-                                        r.removeEventListener('frameupdate', (r as any).__onFrameUpdate);
-                                        const handler = (e: any) => {
-                                            const frame = e.frame;
-                                            const clipEl = document.getElementById('rct-playhead-line') as HTMLElement;
-                                            const labelEl = document.getElementById('rct-playhead-label') as HTMLElement;
-                                            const inpEl = document.getElementById('rct-playhead-input') as HTMLInputElement;
-                                            const dur = Math.ceil((transcript?.clips?.[selectedClipIdx]?.duration || 30) * 30) || 1;
-                                            const pct = (frame / dur) * 100;
-                                            if (clipEl) clipEl.style.left = pct + '%';
-                                            if (labelEl) labelEl.textContent = (frame / 30).toFixed(1) + 's';
-                                            if (inpEl && document.activeElement !== inpEl) inpEl.value = (frame / 30).toFixed(2);
-                                        };
-                                        (r as any).__onFrameUpdate = handler;
-                                        r.addEventListener('frameupdate', handler);
-                                    }
-                                }}
+                                ref={playerRef}
                                 component={Main}
                                 durationInFrames={Math.ceil((transcript?.clips?.[selectedClipIdx]?.duration || 30) * 30)}
                                 compositionWidth={1080} compositionHeight={1920} fps={30}
