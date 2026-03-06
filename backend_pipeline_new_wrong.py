@@ -75,6 +75,7 @@ def extract_audio(video_path, output_audio_path=None, format="wav"):
                 "-y", output_audio_path
             ]
         else: # mp3
+            # Low bitrate (32k) is plenty for Whisper and keeps file size very small
             command = [
                 "ffmpeg", "-i", video_path,
                 "-vn", "-acodec", "libmp3lame", "-b:a", "32k", "-ar", "16000", "-ac", "1",
@@ -87,168 +88,156 @@ def extract_audio(video_path, output_audio_path=None, format="wav"):
         logger.error(f"Failed to extract audio: {str(e)}")
         return None
 
-def transcribe_with_groq(video_path):
-    """Transcribes audio using Groq Whisper (Ultra-Fast & High Precision)."""
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise ValueError("GROQ_API_KEY missing.")
-
-    # Use MP3 to stay under 25MB limit
-    temp_audio = extract_audio(video_path, format="mp3")
-    if not temp_audio:
-        raise ValueError("Audio extraction failed for Groq.")
-
-    try:
-        # Check size (Groq limit is 25MB)
-        if os.path.getsize(temp_audio) > 20 * 1024 * 1024:
-            raise ValueError("Audio file too large for Groq (>20MB).")
-
-        logger.info(f"Transcribing {video_path} via Groq API...")
-        client = Groq(api_key=api_key)
-        with open(temp_audio, "rb") as file:
-            transcription = client.audio.transcriptions.create(
-                file=(temp_audio, file.read()),
-                model="whisper-large-v3",
-                response_format="verbose_json",
-            )
-        
-        words = []
-        segments_data = []
-        
-        # Groq returns segments in verbose_json
-        for seg in transcription.segments:
-            seg_start = seg['start']
-            seg_end = seg['end']
-            seg_text = seg['text'].strip()
-            
-            # Word-level fallback (Groq sometimes has it, but interpolation is safer if missing)
-            raw_words = seg_text.split()
-            seg_words = []
-            if raw_words:
-                word_dur = (seg_end - seg_start) / len(raw_words)
-                for i, w in enumerate(raw_words):
-                    w_obj = {
-                        "word": w.strip(),
-                        "start": seg_start + (i * word_dur),
-                        "end": seg_start + ((i + 1) * word_dur)
-                    }
-                    words.append(w_obj)
-                    seg_words.append(w_obj)
-            
-            segments_data.append({
-                "text": seg_text,
-                "start": seg_start,
-                "end": seg_end,
-                "words": seg_words
-            })
-
-        return {
-            "text": transcription.text,
-            "words": words,
-            "segments": segments_data,
-            "language": transcription.language
-        }
-    finally:
-        if temp_audio and os.path.exists(temp_audio):
-            os.remove(temp_audio)
-
 def transcribe_with_gemini(video_path):
-    """Transcribes video using Gemini 3.1 Flash Lite."""
-    logger.info(f"Transcribing {video_path} via Gemini AI...")
+    """Transcribes video using Gemini 3.1 Flash (Parallel & Ultra Fast)."""
+    logger.info(f"Transcribing {video_path} using Gemini 3.1 Flash Lite...")
     api_key = os.environ.get("GEMINI_API_KEY")
     client = genai.Client(api_key=api_key)
     
-    temp_audio = extract_audio(video_path, format="mp3") # MP3 is safer for uploads
+    temp_audio = extract_audio(video_path, format="wav")
     if not temp_audio:
-        raise ValueError("Audio extraction failed for Gemini.")
-
+        raise ValueError("Could not extract audio for Gemini transcription.")
+    
     try:
-        if os.path.getsize(temp_audio) > 20 * 1024 * 1024:
-            raise ValueError("Audio file too large for Gemini Lite API.")
-
+        # 1. Upload file to Gemini
         uploaded_file = client.files.upload(file=temp_audio)
+        
+        # 2. Wait for processing (usually instant for audio)
         while uploaded_file.state.name == "PROCESSING":
             time.sleep(1)
             uploaded_file = client.files.get(name=uploaded_file.name)
             
+        # 3. Request Transcription
         prompt = """
-        Transcribe this audio. Return ONLY JSON:
-        { "language": "es", "segments": [ { "text": "...", "start": 0.0, "end": 2.0 } ] }
-        Broken segments every 3s.
+        Transcribe this audio EXACTLY as it is. 
+        Provide a JSON output with the following structure:
+        {
+            "language": "en/es/etc",
+            "segments": [
+                {
+                    "text": "The spoken sentence",
+                    "start": 0.0,
+                    "end": 3.0
+                }
+            ]
+        }
+        RULES:
+        - Include MUST filler words (ums, ahs).
+        - Break segments every 3-4 seconds MAX. Short segments are critical for sync.
+        - Ensure timestamps are strictly accurate to the audio.
         """
+        
         response = client.models.generate_content(
             model='gemini-3.1-flash-lite-preview',
             contents=[uploaded_file, prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         
-        result = json.loads(response.text)
+        # Parse text logic (robust)
+        raw_text = response.text.strip()
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("```")[1]
+            if raw_text.startswith("json"): raw_text = raw_text[4:]
+        
+        # Remove trailing comments if any
+        raw_text = re.sub(r'\s*\(use [^)]+\)', '', raw_text)
+        result = json.loads(raw_text)
+        
+        # 4. Convert to Whisper-like format (word interpolation)
         all_words = []
         segments_data = []
         full_text = ""
         
         for seg in result.get("segments", []):
-            text = seg["text"]
-            start = seg["start"]
-            end = seg["end"]
+            text = seg.get("text", "")
+            start = float(seg.get("start", 0))
+            end = float(seg.get("end", start + 1))
             full_text += text + " "
             
             raw_words = text.split()
             seg_words = []
             if raw_words:
-                dur = (end - start) / len(raw_words)
+                word_dur = (end - start) / len(raw_words)
                 for i, w in enumerate(raw_words):
-                    w_obj = {"word": w, "start": start + (i * dur), "end": start + ((i+1) * dur)}
+                    w_obj = {
+                        "word": w.strip(),
+                        "start": start + (i * word_dur),
+                        "end": start + ((i + 1) * word_dur)
+                    }
                     all_words.append(w_obj)
                     seg_words.append(w_obj)
-            segments_data.append({"text": text, "start": start, "end": end, "words": seg_words})
-
+            
+            segments_data.append({
+                "text": text,
+                "start": start,
+                "end": end,
+                "words": seg_words
+            })
+            
+        # Cleanup
+        try: os.remove(temp_audio)
+        except: pass
+        
         return {
             "text": full_text.strip(),
             "words": all_words,
             "segments": segments_data,
-            "language": result.get("language", "es")
+            "language": result.get("language", "en")
         }
-    finally:
-        if temp_audio and os.path.exists(temp_audio):
-            os.remove(temp_audio)
-
-def transcribe_audio_local(video_path, model_size="base"):
-    """Original Local Whisper transcription."""
-    logger.info(f"Transcribing {video_path} locally (Whisper {model_size})...")
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segments, info = model.transcribe(video_path, beam_size=1, word_timestamps=True, vad_filter=True)
-    
-    words = []
-    segments_data = []
-    full_text = ""
-    for segment in segments:
-        full_text += segment.text + " "
-        seg_words = []
-        for word in segment.words:
-            w_obj = {"word": word.word.strip(), "start": word.start, "end": word.end}
-            words.append(w_obj)
-            seg_words.append(w_obj)
-        segments_data.append({"text": segment.text.strip(), "start": segment.start, "end": segment.end, "words": seg_words})
-                
-    return {"text": full_text.strip(), "words": words, "segments": segments_data, "language": info.language}
+        
+    except Exception as e:
+        logger.error(f"Gemini Transcription failed: {e}.")
+        raise e
 
 def transcribe_audio(video_path, model_size="base"):
-    """Hybrid Master Function: Groq -> Gemini -> Local."""
-    # 1. Try Groq (Ultra Fast + Precision)
-    try:
-        return transcribe_with_groq(video_path)
-    except Exception as e:
-        logger.warning(f"Groq failed: {e}. Trying Gemini...")
-
-    # 2. Try Gemini (Cloud Fast)
+    """
+    Transcribes audio using Gemini 3.1 Flash with a fallback to local Whisper.
+    """
     try:
         return transcribe_with_gemini(video_path)
     except Exception as e:
-        logger.warning(f"Gemini failed: {e}. Falling back to LOCAL Whisper.")
+        logger.error(f"Gemini Transcription failed: {e}. Falling back to Whisper.")
+        return transcribe_audio_local(video_path, model_size)
 
-    # 3. Final Fallback: Local
-    return transcribe_audio_local(video_path, model_size)
+def transcribe_audio_local(video_path, model_size="base"):
+    """Fallback local transcription using faster-whisper."""
+    logger.info(f"Transcribing {video_path} using faster-whisper ({model_size} model)...")
+    try:
+        from faster_whisper import WhisperModel
+        model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        
+        # We need language detection here as well for consistency
+        segments, info = model.transcribe(video_path, beam_size=5, word_timestamps=True, vad_filter=True)
+        logger.info(f"Detected language '{info.language}' with probability {info.language_probability:.2f}")
+        
+        words = []
+        segments_data = []
+        full_text = ""
+        
+        for segment in segments:
+            full_text += segment.text + " "
+            seg_words = []
+            for word in segment.words:
+                w_obj = {"word": word.word.strip(), "start": word.start, "end": word.end}
+                words.append(w_obj)
+                seg_words.append(w_obj)
+            
+            segments_data.append({
+                "text": segment.text.strip(),
+                "start": segment.start,
+                "end": segment.end,
+                "words": seg_words
+            })
+            
+        return {
+            "text": full_text.strip(),
+            "words": words,
+            "segments": segments_data,
+            "language": info.language
+        }
+    except Exception as e:
+        logger.error(f"Final local transcription fallback failed: {e}")
+        raise e
 
 def search_pexels_videos(query):
     """Searches Pexels for a video based on query and returns the best URL."""
@@ -279,116 +268,89 @@ def search_pexels_videos(query):
         
     return None
 
-def translate_full_transcript_global(segments_data, source_lang="en"):
-    """Translates or refines the ENTIRE transcript using 'Anchor Segments' and overlapping context."""
+def translate_with_gemini_text(segments_data, source_lang="en"):
+    """
+    Refines/Translates transcript segments using Gemini (handles giant context better).
+    Optimized for high fidelity and stability.
+    """
     if not segments_data: return []
+    logger.info(f"Translating/Refining transcript via Gemini Flash Lite (Batch Mode)...")
     
-    logger.info(f"Performing GLOBAL transcript refinement/translation (Source: {source_lang})...")
     api_key = os.environ.get("GEMINI_API_KEY")
     client = genai.Client(api_key=api_key)
     
-    # 2,000 segments = ~2 hours of video. This is the optimal safety limit for Gemini 2.5/3 Flash output.
-    BATCH_SIZE = 2000
+    # We can handle HUGE batches with Gemini (approx 30 mins of video per batch)
+    BATCH_SIZE = 1000 
     all_translated_words = []
     
     for i in range(0, len(segments_data), BATCH_SIZE):
         batch = segments_data[i : i + BATCH_SIZE]
-        batch_texts = [s["text"] for s in batch]
-        
-        # Overlapping Context: Take up to 5 segments from previous batch for flow/tone consistency
-        prev_context = []
-        if i > 0:
-            prev_context = [s["text"] for s in segments_data[max(0, i-5) : i]]
-        
-        # Prepare a dictionary for translation to maintain mapping integrity
-        batch_map = {str(idx): text for idx, text in enumerate(batch_texts)}
+        batch_map = {str(idx): s["text"] for idx, s in enumerate(batch)}
         
         prompt = f"""
-        Act as a professional transcription refiner and translator. 
-        Your goal is to provide a LITERAL version in Spanish of the provided segments.
+        Act as a professional transcription refiner and literal translator. 
+        TASK:
+        1. If source is English, translate to Neutral Literal Spanish.
+        2. If source is Spanish, fix technical spelling of AI/SaaS terms.
         
         STRICT RULES:
-        1. NO PARA-PHRASING. The text must match the phonetic audio as closely as possible.
-        2. DO NOT "improve" or "clean up" the speaker's style. If the speaker is repetitive, keep it.
-        3. DO NOT remove filler words.
-        4. TECHNICAL TERMS: Ensure terms like 'ChatGPT', 'AI', 'SaaS', 'B-Roll', etc., are spelled correctly.
-        5. LANGUAGE: If the input is English, translate it to Spanish. If the input is already Spanish, FIX ONLY spelling and punctuation.
-        6. FIDELITY: Maintain the exact same amount of information. Your task is literal fidelity.
+        - NO PARAPHRASING. Keep the speaker's original style and filler words.
+        - VERBATIM FIDELITY: Each segment must correspond exactly to the phonetic content.
+        - TECHNICAL TERMS: ChatGPT, SaaS, AI, B-Roll, CRM, etc. must be correctly spelled.
         
-        CONTEXT FROM PREVIOUS SEGMENTS (Do NOT process these):
-        {json.dumps(prev_context)}
-        
-        SEGMENTS TO PROCESS (Index mapping):
+        Segments (Index Mapping):
         {json.dumps(batch_map)}
         
-        OUTPUT FORMAT:
-        Return a raw JSON object where the keys are the INDEXES from the input and the values are the PROCESSED strings.
+        OUTPUT: Return ONLY a JSON object with same indices: {{"0": "texto", "1": "texto"}}
         """
         
-        translated_map = {}
-        max_retries = 3
-        current_delay = 1
-        
-        for attempt in range(max_retries):
-            try:
-                time.sleep(current_delay) 
-                response = client.models.generate_content(
-                    model='gemini-3.1-flash-lite-preview',
-                    contents=prompt,
-                    config=types.GenerateContentConfig(response_mime_type="application/json")
-                )
-                translated_map = json.loads(response.text)
-                
-                # Validate that we have most of the keys
-                if len(translated_map) >= len(batch):
-                    break # Success
-                else:
-                    logger.warning(f"Batch {i} returned fewer translations than expected ({len(translated_map)}/{len(batch)}). Retrying...")
-                    time.sleep(current_delay)
-            except Exception as e:
-                # ... same error handling ...
-                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    logger.warning(f"Quota hit for batch {i}. Retry {attempt+1}/{max_retries} in {current_delay}s...")
-                    time.sleep(current_delay * 2)
-                    current_delay *= 2 
-                else:
-                    logger.error(f"Error in batch {i}: {e}")
-                    break
-
-        if translated_map:
-            # Map back using the ORIGINAL order and segment boundaries
+        try:
+            # Small delay to respect RPM limits
+            if i > 0: time.sleep(2.0)
+            
+            response = client.models.generate_content(
+                model='gemini-2.0-flash-lite-preview-02-05',
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            translated_map = json.loads(response.text)
+            
             for idx in range(len(batch)):
                 idx_str = str(idx)
                 trans_text = translated_map.get(idx_str)
-                
                 orig_seg = batch[idx]
-                seg_start = orig_seg["start"]
-                seg_end = orig_seg["end"]
-                duration = seg_end - seg_start
                 
                 if not trans_text:
-                    # Fallback if key is missing
-                    trans_words = [w["word"] for w in orig_seg["words"]]
-                else:
-                    trans_words = trans_text.split()
+                    all_translated_words.extend(orig_seg.get("words", []))
+                    continue
                 
-                if not trans_words:
-                    trans_words = ["[...]"]
-                
-                # Distribute segment duration across translated words
-                word_dur = duration / len(trans_words)
+                trans_words = trans_text.split()
+                duration = orig_seg["end"] - orig_seg["start"]
+                word_dur = duration / len(trans_words) if trans_words else 0
                 for w_idx, w_text in enumerate(trans_words):
                     all_translated_words.append({
                         "word": w_text,
-                        "start": seg_start + (w_idx * word_dur),
-                        "end": seg_start + ((w_idx + 1) * word_dur)
+                        "start": orig_seg["start"] + (w_idx * word_dur),
+                        "end": orig_seg["start"] + ((w_idx + 1) * word_dur)
                     })
-        else:
-            logger.error(f"Global translation batch failed at segment {i} after retries. Falling back to original.")
-            for s in batch:
-                all_translated_words.extend(s["words"])
-                
+        except Exception as e:
+            logger.error(f"Gemini translation failed for batch {i}: {e}. Keeping original words.")
+            for s in batch: all_translated_words.extend(s.get("words", []))
+
     return all_translated_words
+
+def translate_full_transcript_global(segments_data, source_lang="en"):
+    """
+    Unified entry point for transcript translation.
+    Uses Gemini exclusively for stability and massive context handling.
+    """
+    if not segments_data: return []
+    return translate_with_gemini_text(segments_data, source_lang)
+
+# Global constants for Supabase
+
+
+# Global constants for Supabase
 
 # Global constants for Supabase
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -421,23 +383,9 @@ def get_supabase_accounts(user_id=None):
     
     return []
 
-def analyze_with_gemini(transcript, user_id=None):
+def analyze_with_gemini(transcript, user_id=None, video_title="Unknown"):
     """
     MOTOR DE EXTRACCIÓN VIRAL v3.0 — Llamada única con chain-of-thought
-
-    Una sola llamada a Gemini. El JSON de salida tiene dos secciones:
-      "context" — razonamiento previo: Gemini analiza el vídeo completo
-                  antes de seleccionar nada (tema, tono, momentos intensos,
-                  frases gancho, datos concretos).
-      "clips"   — extracción final: usando el contexto como guía, selecciona
-                  los mejores fragmentos aplicando los 3 pilares virales
-                  (Hook / Hold / Reward).
-
-    El orden en el JSON obliga al modelo a pensar antes de decidir.
-    Mismo beneficio que dos llamadas, un solo API call.
-
-    Score unificado: umbral único >= 5 en prompt y en código.
-    Sin límite fijo de clips — la calidad es el único filtro.
     """
     logger.info("=== MOTOR DE EXTRACCIÓN VIRAL v3.0 ===")
     logger.info("Iniciando análisis viral (llamada única con chain-of-thought)...")
@@ -447,57 +395,43 @@ def analyze_with_gemini(transcript, user_id=None):
 
     client = genai.Client(api_key=api_key)
 
-    # Transcripción en dos formatos:
-    # 1. Segmentos legibles — para análisis narrativo y selección de clips
     transcript_text = "\n".join(
         f"[{s['start']:.1f}s - {s['end']:.1f}s] {s['text']}"
         for s in transcript['segments']
     )
-    # 2. Words con timestamps precisos — para anclar zooms e iconos a momentos exactos
-    # Muestreo dinámico basado en duración real del vídeo:
-    # - Vídeos cortos (<20 min): todos los words sin límite
-    # - Vídeos medianos (20-40 min): muestra representativa de 3.000 words
-    # - Vídeos largos (>40 min): muestra representativa de 4.000 words
-    # La muestra es DISTRIBUIDA uniformemente (no truncada), para que Gemini
-    # vea el inicio, el medio y el final con igual atención.
+    
     all_words = transcript['words']
     total_words = len(all_words)
     video_duration_min = (all_words[-1]['end'] / 60.0) if all_words else 0
 
     if video_duration_min <= 20:
-        # Vídeo corto — enviar todo
         sampled_words = all_words
         length_instruction = "Extrae todos los buenos clips que encuentres, al menos 3 a 5 si tienen calidad."
     else:
-        # Vídeo largo — muestra distribuida uniformemente
         max_words = 4000 if video_duration_min > 40 else 3000
         if total_words <= max_words:
             sampled_words = all_words
         else:
-            # Calcular paso de muestreo para distribuir uniformemente
             step = total_words / max_words
             sampled_words = [all_words[int(i * step)] for i in range(max_words)]
 
-        logger.info(
-            f"Vídeo largo ({video_duration_min:.1f} min) — words muestreados: "
-            f"{len(sampled_words)}/{total_words} (distribuidos uniformemente)"
-        )
+        logger.info(f"Vídeo largo ({video_duration_min:.1f} min) — words muestreados: {len(sampled_words)}/{total_words}")
         
         if video_duration_min > 40:
-            length_instruction = "¡ALERTA CRÍTICA! Este es un VÍDEO MUY LARGO (más de 40 minutos) lleno de valor. Tienes la OBLIGACIÓN ABSOLUTA de extraer TODOS los momentos virales, que suelen ser ENTRE 10 Y 25 CLIPS INDIVIDUALES. ¡NO seas perezoso! Revisa toda la hora."
+            length_instruction = "¡ALERTA CRÍTICA! Este es un VÍDEO MUY LARGO (más de 40 minutos). Tienes la OBLIGACIÓN ABSOLUTA de extraer TODOS los momentos virales (10-25 clips)."
         else:
-            length_instruction = "¡ATENCIÓN! Este vídeo dura más de 20 minutos. Deberías encontrar un MÍNIMO de 8 a 15 clips de alta calidad. Extrae todos y cada uno de ellos."
+            length_instruction = "¡ATENCIÓN! Este vídeo dura más de 20 minutos. Deberías encontrar un MÍNIMO de 8 a 15 clips de alta calidad."
 
-    transcript_words = json.dumps(sampled_words, ensure_ascii=False)
+    transcript_words_json = json.dumps(sampled_words, ensure_ascii=False)
 
     prompt = f"""
 Eres el mejor editor de contenido viral del mundo. Tu respuesta tiene DOS PASOS
 que debes ejecutar EN ORDEN dentro de un único JSON.
 
+TÍTULO DEL VÍDEO PARA CONTEXTO: {video_title}
+
 PASO 1 → rellena el objeto "context" (tu razonamiento previo sobre el vídeo)
 PASO 2 → rellena el array "clips" (tu selección final, usando el contexto del paso 1)
-
-Este orden es obligatorio. Primero entiendes el vídeo, luego extraes los clips.
 
 {length_instruction}
 
@@ -505,208 +439,76 @@ Este orden es obligatorio. Primero entiendes el vídeo, luego extraes los clips.
 PASO 1 — ANÁLISIS DE CONTEXTO
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Lee la transcripción completa y extrae:
-
-- tema_central: una frase que resume de qué trata el vídeo
-- tono: motivacional / educativo / polémico / narrativo / mixto
-- angulo_unico: qué hace diferente a este creador vs. el resto del contenido del mismo tema
-- datos_concretos: cualquier cifra, edad, cantidad, precio, porcentaje mencionado
-- frases_gancho: las 5-8 frases literales más poderosas, las que podrían detener el scroll
-- momentos_intensos: mínimo {6 if video_duration_min > 40 else 3}, máximo {25 if video_duration_min > 40 else 10} picos emocionales, revelaciones,
-  contradicciones, historias personales o datos impactantes con sus timestamps
-- is_podcast: true si detectas un diálogo/entrevista entre 2 o más personas, 
-  false si es un monólogo, un solo narrador hablando a cámara o un tutorial.
-  
-- account_id: Elije el ID de la cuenta de esta lista que mejor encaja con el nicho del video:
-  {json.dumps(get_supabase_accounts(user_id), ensure_ascii=False)}
-  Si ninguna encaja bien, pon null.
+Lee la transcripción completa y extrae tema_central, tono, angulo_unico, datos_concretos, frases_gancho, momentos_intensos e is_podcast.
+Mapea también el account_id adecuado de esta lista:
+{json.dumps(get_supabase_accounts(user_id), ensure_ascii=False)}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PASO 2 — EXTRACCIÓN DE CLIPS VIRALES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+Misión prioritaria: Encuentra el CLIP DEL TÍTULO que justifica "{video_title}" y márcalo con "is_title_clip": true.
 
-Usando el análisis del Paso 1 como guía, selecciona los fragmentos que puedan
-convertirse en shorts que la gente no pueda dejar de ver, que comenten,
-que guarden y que compartan.
+DURACIÓN: MÍNIMO 18s | IDEAL 30-60s | MÁXIMO 90s.
+Score umbral: >= 5.
 
-LOS 3 PILARES DEL SHORT VIRAL EN 2026:
+ZONES DE EFECTO (EDIT_EVENTS):
+Inyecta zooms e iconos. Los "time" deben corresponder EXACTAMENTE a timestamps de la lista PALABRAS abajo.
 
-PILAR 1 — HOOK (primeros 3 segundos): EL MÁS IMPORTANTE
-El algoritmo mide qué porcentaje de espectadores pasan los 3 primeros segundos.
-Sin gancho fuerte el clip no existe, no importa qué tan bueno sea el resto.
-
-Tipos de gancho (en orden de efectividad):
-1. CONTRAINTUITIVO — contradice lo que el espectador cree que es verdad
-   Ej: "Las metas están sobrevaloradas" / "La motivación es una mentira"
-2. DATO_IMPACTO — cifra específica + historia personal
-   Ej: "Tenía 5.7€ en mi cuenta y a los 21 años gané mi primer millón"
-3. PREGUNTA_DOLOR — pregunta que el espectador no puede ignorar porque lo describe
-   Ej: "¿Por qué hay gente con menos talento que tú ganando más dinero?"
-4. DIAGNOSTICO — nombrar el problema exacto que el espectador tiene
-   Ej: "El problema no es que no tengas tiempo. Es que dependes de la motivación."
-5. LOOP_ABIERTO — empezar algo y no terminarlo en los primeros 3s
-   Ej: "Déjame contarte por qué casi pierdo todo lo que construí..."
-
-PILAR 2 — HOLD (segundos 3-45): MANTENER LA RETENCIÓN
-La retención cae si hay más de 8 segundos sin una frase de alto valor.
-Un buen fragmento tiene una idea nueva o giro cada 8-10 segundos,
-usa storytelling (situación → conflicto → resolución), e incluye datos concretos.
-
-PILAR 3 — REWARD (últimos 5 segundos): TRIGGER DE COMPARTIR
-Los vídeos que se comparten terminan con una verdad incómoda, un consejo
-accionable, o una frase que resume algo que el espectador sentía pero no podía articular.
-
-SISTEMA DE PUNTUACIÓN — UMBRAL ÚNICO >= 5:
-
-HOOK (máx 9 pts):
-+3 primera frase contradice creencia común o genera disonancia cognitiva
-+3 contiene dato concreto (cifra, edad, cantidad) en los primeros 10 segundos
-+2 hace pregunta que describe exactamente el dolor del espectador
-+1 tiene loop abierto que obliga a seguir viendo
-
-HOLD (máx 6 pts):
-+3 historia personal completa (situación → problema → resolución)
-+2 giro narrativo o revelación que cambia el marco de la idea
-+1 alta densidad de valor (varias ideas fuertes en poco tiempo)
-
-REWARD (máx 4 pts):
-+2 genera debate o comentarios ("¿esto es verdad?", "yo también pasé por esto")
-+2 termina con frase que el espectador quiere guardar o enviar a alguien
-
-PENALIZACIONES:
--2 primeros 3 segundos débiles, genéricos o de introducción
--2 más de 10 segundos consecutivos sin frase de alto valor
--1 clip depende de contexto muy específico que el espectador no tiene
-
-UMBRAL: válido SOLO si score >= 5.
-
-DURACIÓN: MÍNIMO 23s | IDEAL 40-60s | MÁXIMO 75s
-Si una idea poderosa dura más de 75s, extrae el sub-fragmento más intenso.
-
-AUTONOMÍA NARRATIVA FLEXIBLE:
-Se permiten referencias a conceptos universales (dinero, tiempo, éxito, fracaso,
-relaciones, salud). NO referencias a personas o eventos específicos sin explicar.
-
-DIVERSIDAD TEMÁTICA:
-Cada clip debe tener un ángulo diferente. No selecciones dos clips que digan
-esencialmente lo mismo aunque estén en distintos momentos del vídeo.
-
-CLASIFICACIÓN (máx 2 etiquetas por clip):
-- EXPLOSION: Desafía narrativa dominante, puede generar desacuerdo
-- AUTORIDAD: Framework mental claro, enseña psicología o lógica fuerte
-- CONVERSION: Identifica dolor específico, señala error concreto, CTA implícito
-MIX IDEAL: 50% EXPLOSION | 30% AUTORIDAD | 20% CONVERSION
-
-TÍTULOS: En español, orientados a búsqueda social real.
-Ej: "¿Por qué siempre abandono mis metas?" > "Cómo tener éxito"
-
-MICRO-MOVIMIENTOS: Zooms/cortes cada 2-4s para mantener engagement visual.
-
-ICONOS: 4-7 iconos por clip alineados con las palabras clave.
-KEYWORDS DISPONIBLES: 'money', 'cash', 'rich', 'idea', 'think', 'mind', 'warning',
-'alert', 'danger', 'stop', 'no', 'error', 'wrong', 'check', 'yes', 'correct', 'ok',
-'time', 'clock', 'fast', 'speed', 'heart', 'love', 'hot', 'rocket', 'growth', 'up',
-'down', 'work', 'task', 'office', 'success', 'win', 'star', 'laugh', 'funny', 'lol',
-'wow', 'shock', 'amazing', 'cool', 'look', 'eye', 'sad', 'bad', 'cry', 'phone',
-'computer', 'tech', 'camera', 'video', 'mic', 'search', 'find', 'link', 'lock',
-'shield', 'tool', 'fix', 'build', 'book', 'learn', 'write', 'news', 'mail', 'chat',
-'home', 'world', 'travel', 'sun', 'moon', 'star_special', 'music', 'sound',
-'gift', 'party', 'health'
-
-EDIT_EVENTS — REGLA CRÍTICA:
-Los "time" de zooms e iconos deben corresponder exactamente al "start" de una
-palabra real en la sección PALABRAS CON TIMESTAMPS al final de este prompt.
-NO inventes tiempos. Usa solo timestamps que existan en esa lista.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FORMATO DE SALIDA JSON — ESTRUCTURA OBLIGATORIA
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Devuelve SIEMPRE este objeto completo. Primero "context", luego "clips".
-Si ningún clip alcanza score >= 5, devuelve "clips" como array vacío.
-
+FORMATO OBLIGATORIO JSON:
 {{
   "context": {{
-    "tema_central": "<string>",
-    "is_podcast": <boolean>,
-    "account_id": <number|null>,
-    "tono": "<string>",
-    "angulo_unico": "<string>",
-    "datos_concretos": ["<string>"],
-    "frases_gancho": ["<string>"],
-    "momentos_intensos": [
-      {{
-        "tiempo_inicio": 0.0,
-        "tiempo_fin": 0.0,
-        "descripcion": "<string>"
-      }}
-    ]
+    "tema_central": "string",
+    "tono": "string",
+    "is_podcast": boolean,
+    "account_id": number,
+    "momentos_intensos": [{{ "tiempo_inicio": 0.0, "tiempo_fin": 0.0, "descripcion": "string" }}]
   }},
   "clips": [
     {{
       "id": 1,
-      "title": "<Título en español para búsqueda social>",
+      "title": "Título viral",
       "start": 0.0,
       "end": 0.0,
-      "score": 0,
-      "hook_type": "<CONTRAINTUITIVO / DATO_IMPACTO / PREGUNTA_DOLOR / DIAGNOSTICO / LOOP_ABIERTO>",
-      "score_breakdown": {{
-        "hook": 0,
-        "hold": 0,
-        "reward": 0,
-        "penalties": 0
-      }},
-      "score_factors": ["<factor>"],
-      "classification": ["EXPLOSION"],
-      "dominant_emotion": "<indignación / revelación / validación / urgencia / esperanza>",
-      "virality_level": 8,
-      "reasoning": "<Por qué puede volverse viral — 1-2 líneas en español>",
-      "comment_trigger": "<La frase que va a generar más comentarios>",
+      "score": 8,
+      "is_title_clip": boolean,
+      "hook_type": "CONTRAINTUITIVO",
+      "reasoning": "Por qué es viral",
       "edit_events": {{
         "zooms": [{{"time": 0.0, "type": "in", "intensity": 0.5}}],
-        "icons": [{{"time": 0.0, "keyword": "keyword", "layout": "center", "duration": 1.5}}],
-        "b_rolls": [{{"time": 0.0, "query": "English Pexels search query", "duration": 3.0}}]
+        "icons": [{{"time": 0.0, "keyword": "money", "layout": "center", "duration": 1.5}}],
+        "b_rolls": [{{"time": 0.0, "query": "business logic", "duration": 3.0}}]
       }}
     }}
   ]
 }}
 
-Ordena los clips de MAYOR a MENOR score.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TRANSCRIPCIÓN — SEGMENTOS
-(usa para entender la narrativa y seleccionar clips)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TRANSCRIPCIÓN SEGMENTOS:
 {transcript_text}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TRANSCRIPCIÓN — PALABRAS CON TIMESTAMPS PRECISOS
-(usa SOLO esto para los "time" de zooms e iconos en edit_events)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{transcript_words}
+PALABRAS CON TIMESTAMPS:
+{transcript_words_json}
 """
 
-    time.sleep(1)
-    response = None
     try:
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
-
+        
         raw_text = response.text.strip()
+        
+        # Limpieza de markdown si existe
         if raw_text.startswith("```"):
             raw_text = raw_text.split("```")[1]
             if raw_text.startswith("json"): raw_text = raw_text[4:]
-
-        import re
+            
+        # Limpieza de comentarios que Gemini a veces inyecta (ej: "field": "val" (use this))
         clean_text = re.sub(r'\s*\(use [^)]+\)', '', raw_text)
-
+        
         result = json.loads(clean_text)
-
-        # Loguear contexto si está disponible
+        
         ctx = result.get("context", {})
         if ctx:
             logger.info(
@@ -715,45 +517,36 @@ TRANSCRIPCIÓN — PALABRAS CON TIMESTAMPS PRECISOS
                 f"Momentos intensos: {len(ctx.get('momentos_intensos', []))}"
             )
 
-        if "clips" in result and len(result["clips"]) > 0:
-            # Umbral único: score >= 5
-            valid_clips = [c for c in result["clips"] if c.get("score", 0) >= 5]
-            rejected_count = len(result["clips"]) - len(valid_clips)
-            if rejected_count > 0:
-                logger.info(f"Filtrados {rejected_count} clips con score < 5")
-
-            # Validar duración (margen de seguridad 18-90s)
-            duration_valid = []
-            for c in valid_clips:
-                clip_duration = float(c.get('end', 0)) - float(c.get('start', 0))
-                if 18 <= clip_duration <= 90:
-                    duration_valid.append(c)
+        raw_clips = result.get("clips", [])
+        valid_clips = []
+        for c in raw_clips:
+            score = c.get("score", 0)
+            if score >= 5:
+                dur = float(c.get('end', 0)) - float(c.get('start', 0))
+                if 18 <= dur <= 95:
+                    valid_clips.append(c)
                 else:
-                    logger.info(f"Clip descartado '{c.get('title', '')}' — duración {clip_duration:.1f}s fuera de rango")
-
-            result["clips"] = duration_valid
-
-            if duration_valid:
-                best = duration_valid[0]
-                logger.info(
-                    f"Motor Viral v3.0 encontró {len(duration_valid)} clips válidos (score ≥ 5). "
-                    f"Mejor: score={best.get('score')} | hook={best.get('hook_type')} | "
-                    f"inicia en {best.get('start')}s"
-                )
-            else:
-                logger.warning("Todos los clips filtrados — SIN CLIPS con intensidad suficiente")
-        else:
-            logger.warning("Gemini no encontró clips — INTENSIDAD INSUFICIENTE en la transcripción")
-
+                    logger.info(f"Clip descartado '{c.get('title', '')}' — duración {dur:.1f}s fuera de rango")
+        
+        result["clips"] = valid_clips
+        if valid_clips:
+            best = valid_clips[0]
+            logger.info(
+                f"Motor Viral v3.0 encontró {len(valid_clips)} clips válidos (score ≥ 5). "
+                f"Mejor: score={best.get('score')} | hook={best.get('hook_type')} | inicia en {best.get('start')}s"
+            )
         return result
 
     except Exception as e:
-        err_msg = f"Error procesando respuesta de Gemini. Error: {str(e)}"
-        if response and hasattr(response, 'text'):
-            err_msg += f" | Respuesta raw: {response.text[:500]}..."
-        logger.exception(err_msg)
+        logger.exception(f"Error en analyze_with_gemini: {e}")
         raise e
 
+    except Exception as e:
+        err_msg = f"Error procesando respuesta de Gemini. Error: {str(e)}"
+        if 'response_1' in locals() and hasattr(response_1, 'text'):
+            err_msg += f" | Respuesta 1 raw: {response_1.text[:500]}..."
+        logger.exception(err_msg)
+        raise e
 
 def extract_frame(video_path, time_in_seconds, output_path):
     logger.info(f"Extracting frame at {time_in_seconds}s to {output_path}...")
@@ -1213,19 +1006,7 @@ if __name__ == "__main__":
 
         # 1. Download (Always download if URL provided)
         t_start = time.time()
-        
-        # --- MODO TEST: Si la URL es la palabra 'test', usamos input.mp4 local ---
-        if youtube_url and youtube_url.lower().strip() == "test":
-            logger.info("🧪 [MODO TEST] Usando 'input.mp4' local de la raíz del proyecto.")
-            if os.path.exists("input.mp4"):
-                import shutil
-                shutil.copy("input.mp4", INPUT_FILE)
-                video_file = INPUT_FILE
-                youtube_url = "Local Test File"
-            else:
-                logger.error("❌ MODO TEST: 'input.mp4' no encontrado en la raíz. Abortando.")
-                raise FileNotFoundError("'input.mp4' missing for test mode.")
-        elif youtube_url:
+        if youtube_url:
             video_file = download_video(youtube_url, INPUT_FILE)
         elif os.path.exists("input_full.mp4"):
             video_file = "input_full.mp4"
@@ -1234,7 +1015,6 @@ if __name__ == "__main__":
             # Fallback default
             youtube_url = "https://www.youtube.com/watch?v=okL1xL_hHOw"
             video_file = download_video(youtube_url, INPUT_FILE)
-        # --- FIN MODO TEST ---
         logger.info(f"   ✅ [PHASE 1] Download completed in {time.time() - t_start:.2f}s")
         
         # 1.5 NOTE: No proxy needed — analyze_framing_high_precision_local already
@@ -1243,9 +1023,9 @@ if __name__ == "__main__":
         # The validate_universal_fix.py approach (using the original video directly) is correct.
         logger.info(f"   ✅ [PHASE 1.5] Skipping proxy — framing will use original video directly (480px internal downscale)")
         
-        # 2. Transcribe
+        # 2. Transcribe (Using Whisper for sub-second word precision)
         t_start = time.time()
-        transcript = transcribe_audio(video_file)
+        transcript = transcribe_audio(video_file, model_size="base")
         logger.info(f"   ✅ [PHASE 2] Transcription completed in {time.time() - t_start:.2f}s")
             
         # 2.5 GLOBAL REFINEMENT / TRANSLATION
@@ -1260,13 +1040,16 @@ if __name__ == "__main__":
 
         # 3. Analyze Transcript with Gemini (New v3.0 logic with context and account detection)
         t_start = time.time()
-        analysis_result = analyze_with_gemini(transcript, user_id=user_id)
-        logger.info(f"   ✅ [PHASE 3] Gemini Viral Analysis completed in {time.time() - t_start:.2f}s")
+        analysis_result = analyze_with_gemini(transcript, user_id=user_id, video_title=title)
         
+        # --- PHASE 3 LOGGING (Moved here to match v3.0 logic) ---
         context = analysis_result.get("context", {})
         raw_clips = analysis_result.get("clips", [])
         is_podcast_global = context.get("is_podcast", False)
         selected_account_id = context.get("account_id")
+        video_title_final = context.get("tema_central", title)
+        
+        logger.info(f"   ✅ [PHASE 3] Gemini Viral Analysis completed in {time.time() - t_start:.2f}s")
         logger.info(f"GEMINI CONTEXT — Format: {'Podcast/Interview' if is_podcast_global else 'Monologue/Tutorial'}")
 
         if not analysis_result or not raw_clips:
@@ -1331,7 +1114,7 @@ if __name__ == "__main__":
             t_frame = time.time()
             # Pasamos los detectores compartidos para no recargarlos
             framing_data = analyze_framing_high_precision_local(
-                V_OUT, 0.0, end_time - start_time, 
+                V_OUT, 0, end_time - start_time, 
                 is_podcast=is_podcast_global,
                 detector=shared_detector,
                 face_detector=shared_face_detector
@@ -1363,33 +1146,40 @@ if __name__ == "__main__":
                 "audio_url": os.path.basename(A_OUT)
             }
             
+            if clip_data.get("is_title_clip"):
+                logger.info(f"      📍 [Title Match] This clip matches the video title: '{video_title}'")
+            
             processed_clips.append(clip_data)
 
         # 4. Limpieza de IA
         shared_detector.close()
         shared_face_detector.close()
 
-        # Fetch the original video title for the manifest
-        video_title = "Unknown Video"
-        try:
-            with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
-                info = ydl.extract_info(youtube_url, download=False)
-                video_title = info.get('title', "Project")
-        except: pass
+        # Detect which index is the title clip and reposition it to the first spot
+        title_clip = next((c for c in processed_clips if c.get("is_title_clip")), None)
+        other_clips = [c for c in processed_clips if not c.get("is_title_clip")]
+        
+        # Sort ONLY the other clips by score desc
+        other_clips.sort(key=lambda x: x.get('score', 0), reverse=True)
+        
+        # Final list: Title Clip first (if found), then the rest by score
+        final_clips = ([title_clip] if title_clip else []) + other_clips
+        title_clip_idx = 0 if title_clip else None
 
         final_data = {
-            "clips": processed_clips,
+            "clips": final_clips,
             "version": version,
             "user_id": user_id,
-            "video_title": video_title,
+            "video_title": video_title_final,
             "account_id": selected_account_id,
             "is_podcast": is_podcast_global,
             "niche_name": initial_niche,
-            # For backward compatibility, keep top clip markers at root
-            "words": processed_clips[0]["words"],
-            "words_es": processed_clips[0]["words_es"],
-            "video_url": processed_clips[0]["video_url"],
-            "audio_url": processed_clips[0]["audio_url"]
+            "title_clip_index": title_clip_idx,
+            # For backward compatibility, keep top clip markers at root (now Title Clip if exists)
+            "words": final_clips[0]["words"] if final_clips else [],
+            "words_es": final_clips[0]["words_es"] if final_clips else [],
+            "video_url": final_clips[0]["video_url"] if final_clips else "",
+            "audio_url": final_clips[0]["audio_url"] if final_clips else ""
         }
 
         # If we have an account_id detected or a niche provided, enrich the manifest

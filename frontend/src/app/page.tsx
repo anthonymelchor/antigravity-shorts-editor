@@ -890,6 +890,12 @@ export default function Home() {
                                             <div className="flex flex-col">
                                                 <div className="flex items-center gap-2">
                                                     <h3 className="text-sm font-normal truncate max-w-[400px] text-white/90">{clip.title || `Segment #${idx + 1}`}</h3>
+                                                    {clip.is_title_clip && (
+                                                        <span className="bg-indigo-500/20 border border-indigo-400/40 text-indigo-400 px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-tight flex items-center gap-1 shadow-[0_0_15px_rgba(99,102,241,0.2)]">
+                                                            <Sparkles className="w-3 h-3" />
+                                                            Clip del Título
+                                                        </span>
+                                                    )}
                                                     {isRendering && clipRenderStatus?.status === 'queued' && (
                                                         <span className="bg-amber-500 text-white px-2 py-0.5 rounded-full animate-pulse text-[8px] font-black uppercase tracking-tight flex items-center gap-1">
                                                             <Clock className="w-3 h-3" />

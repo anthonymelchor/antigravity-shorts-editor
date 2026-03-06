@@ -488,16 +488,20 @@ def run_pipeline(url: str, version: int, niche: Optional[str] = None):
     # Log Start for Observability (Standard 5)
     print(f"[START] Process {version} initiated for URL: {url}")
 
-    try:
-        # Fetch Title with timeout (Standard 1 - Resiliencia)
-        ydl_opts = {'quiet': True, 'no_warnings': True, 'noplaylist': True, 'socket_timeout': 10}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # We use download=False to just get metadata
-            info = ydl.extract_info(url, download=False)
-            state.title = info.get('title', url)
-    except Exception as e:
-        print(f"[Pipeline] Title fetch error (probable timeout/network): {e}")
-        state.title = url
+    # --- MODO TEST: Si la URL es la palabra 'test', evitamos llamar a yt-dlp ---
+    if url and url.lower().strip() == "test":
+        state.title = "Local Test Project"
+        print(f"🧪 [MODO TEST] Saltando metadatos para input.mp4 local")
+    else:
+        try:
+            ydl_opts = {'quiet': True, 'no_warnings': True, 'noplaylist': True, 'socket_timeout': 10}
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # We use download=False to just get metadata
+                info = ydl.extract_info(url, download=False)
+                state.title = info.get('title', url)
+        except Exception as e:
+            print(f"[Pipeline] Title fetch error (probable timeout/network): {e}")
+            state.title = url
 
     # Wait for turn (The Queue logic - Standard 4)
     print(f"[QUEUE] Process {version} waiting for semaphore...")

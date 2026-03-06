@@ -12,7 +12,6 @@ import mediapipe as mp
 from faster_whisper import WhisperModel
 from google import genai
 from google.genai import types
-from groq import Groq
 from dotenv import load_dotenv
 
 # Cargar variables de entorno desde .env
@@ -60,195 +59,47 @@ def download_video(url, output_path):
         logger.error(f"Failed to download video: {str(e)}")
         raise e
 
-def extract_audio(video_path, output_audio_path=None, format="wav"):
-    """Extracts audio from video to a temporary WAV or MP3 file."""
-    if output_audio_path is None:
-        ext = "wav" if format == "wav" else "mp3"
-        output_audio_path = video_path.rsplit('.', 1)[0] + f"_temp_audio.{ext}"
-    
-    logger.info(f"Extracting audio ({format}): {output_audio_path}...")
+def transcribe_audio(video_path, model_size="base"):
+    logger.info(f"Transcribing {video_path} using faster-whisper ({model_size} model)...")
     try:
-        if format == "wav":
-            command = [
-                "ffmpeg", "-i", video_path,
-                "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
-                "-y", output_audio_path
-            ]
-        else: # mp3
-            command = [
-                "ffmpeg", "-i", video_path,
-                "-vn", "-acodec", "libmp3lame", "-b:a", "32k", "-ar", "16000", "-ac", "1",
-                "-y", output_audio_path
-            ]
-            
-        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return output_audio_path
-    except Exception as e:
-        logger.error(f"Failed to extract audio: {str(e)}")
-        return None
+        # Run on CPU with INT8 representation for lower memory usage.
+        model = WhisperModel(model_size, device="cpu", compute_type="int8")
 
-def transcribe_with_groq(video_path):
-    """Transcribes audio using Groq Whisper (Ultra-Fast & High Precision)."""
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise ValueError("GROQ_API_KEY missing.")
+        segments, info = model.transcribe(video_path, beam_size=1, word_timestamps=True, vad_filter=True)
 
-    # Use MP3 to stay under 25MB limit
-    temp_audio = extract_audio(video_path, format="mp3")
-    if not temp_audio:
-        raise ValueError("Audio extraction failed for Groq.")
+        logger.info(f"Detected language '{info.language}' with probability {info.language_probability}")
 
-    try:
-        # Check size (Groq limit is 25MB)
-        if os.path.getsize(temp_audio) > 20 * 1024 * 1024:
-            raise ValueError("Audio file too large for Groq (>20MB).")
-
-        logger.info(f"Transcribing {video_path} via Groq API...")
-        client = Groq(api_key=api_key)
-        with open(temp_audio, "rb") as file:
-            transcription = client.audio.transcriptions.create(
-                file=(temp_audio, file.read()),
-                model="whisper-large-v3",
-                response_format="verbose_json",
-            )
-        
         words = []
         segments_data = []
-        
-        # Groq returns segments in verbose_json
-        for seg in transcription.segments:
-            seg_start = seg['start']
-            seg_end = seg['end']
-            seg_text = seg['text'].strip()
-            
-            # Word-level fallback (Groq sometimes has it, but interpolation is safer if missing)
-            raw_words = seg_text.split()
+        full_text = ""
+        for segment in segments:
+            full_text += segment.text + " "
             seg_words = []
-            if raw_words:
-                word_dur = (seg_end - seg_start) / len(raw_words)
-                for i, w in enumerate(raw_words):
-                    w_obj = {
-                        "word": w.strip(),
-                        "start": seg_start + (i * word_dur),
-                        "end": seg_start + ((i + 1) * word_dur)
-                    }
-                    words.append(w_obj)
-                    seg_words.append(w_obj)
+            for word in segment.words:
+                w_obj = {
+                    "word": word.word.strip(),
+                    "start": word.start,
+                    "end": word.end
+                }
+                words.append(w_obj)
+                seg_words.append(w_obj)
             
             segments_data.append({
-                "text": seg_text,
-                "start": seg_start,
-                "end": seg_end,
+                "text": segment.text.strip(),
+                "start": segment.start,
+                "end": segment.end,
                 "words": seg_words
             })
-
-        return {
-            "text": transcription.text,
-            "words": words,
-            "segments": segments_data,
-            "language": transcription.language
-        }
-    finally:
-        if temp_audio and os.path.exists(temp_audio):
-            os.remove(temp_audio)
-
-def transcribe_with_gemini(video_path):
-    """Transcribes video using Gemini 3.1 Flash Lite."""
-    logger.info(f"Transcribing {video_path} via Gemini AI...")
-    api_key = os.environ.get("GEMINI_API_KEY")
-    client = genai.Client(api_key=api_key)
-    
-    temp_audio = extract_audio(video_path, format="mp3") # MP3 is safer for uploads
-    if not temp_audio:
-        raise ValueError("Audio extraction failed for Gemini.")
-
-    try:
-        if os.path.getsize(temp_audio) > 20 * 1024 * 1024:
-            raise ValueError("Audio file too large for Gemini Lite API.")
-
-        uploaded_file = client.files.upload(file=temp_audio)
-        while uploaded_file.state.name == "PROCESSING":
-            time.sleep(1)
-            uploaded_file = client.files.get(name=uploaded_file.name)
-            
-        prompt = """
-        Transcribe this audio. Return ONLY JSON:
-        { "language": "es", "segments": [ { "text": "...", "start": 0.0, "end": 2.0 } ] }
-        Broken segments every 3s.
-        """
-        response = client.models.generate_content(
-            model='gemini-3.1-flash-lite-preview',
-            contents=[uploaded_file, prompt],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
-        
-        result = json.loads(response.text)
-        all_words = []
-        segments_data = []
-        full_text = ""
-        
-        for seg in result.get("segments", []):
-            text = seg["text"]
-            start = seg["start"]
-            end = seg["end"]
-            full_text += text + " "
-            
-            raw_words = text.split()
-            seg_words = []
-            if raw_words:
-                dur = (end - start) / len(raw_words)
-                for i, w in enumerate(raw_words):
-                    w_obj = {"word": w, "start": start + (i * dur), "end": start + ((i+1) * dur)}
-                    all_words.append(w_obj)
-                    seg_words.append(w_obj)
-            segments_data.append({"text": text, "start": start, "end": end, "words": seg_words})
-
+                
         return {
             "text": full_text.strip(),
-            "words": all_words,
+            "words": words,
             "segments": segments_data,
-            "language": result.get("language", "es")
+            "language": info.language
         }
-    finally:
-        if temp_audio and os.path.exists(temp_audio):
-            os.remove(temp_audio)
-
-def transcribe_audio_local(video_path, model_size="base"):
-    """Original Local Whisper transcription."""
-    logger.info(f"Transcribing {video_path} locally (Whisper {model_size})...")
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segments, info = model.transcribe(video_path, beam_size=1, word_timestamps=True, vad_filter=True)
-    
-    words = []
-    segments_data = []
-    full_text = ""
-    for segment in segments:
-        full_text += segment.text + " "
-        seg_words = []
-        for word in segment.words:
-            w_obj = {"word": word.word.strip(), "start": word.start, "end": word.end}
-            words.append(w_obj)
-            seg_words.append(w_obj)
-        segments_data.append({"text": segment.text.strip(), "start": segment.start, "end": segment.end, "words": seg_words})
-                
-    return {"text": full_text.strip(), "words": words, "segments": segments_data, "language": info.language}
-
-def transcribe_audio(video_path, model_size="base"):
-    """Hybrid Master Function: Groq -> Gemini -> Local."""
-    # 1. Try Groq (Ultra Fast + Precision)
-    try:
-        return transcribe_with_groq(video_path)
     except Exception as e:
-        logger.warning(f"Groq failed: {e}. Trying Gemini...")
-
-    # 2. Try Gemini (Cloud Fast)
-    try:
-        return transcribe_with_gemini(video_path)
-    except Exception as e:
-        logger.warning(f"Gemini failed: {e}. Falling back to LOCAL Whisper.")
-
-    # 3. Final Fallback: Local
-    return transcribe_audio_local(video_path, model_size)
+        logger.error(f"Failed to transcribe audio: {str(e)}")
+        raise e
 
 def search_pexels_videos(query):
     """Searches Pexels for a video based on query and returns the best URL."""
@@ -333,7 +184,7 @@ def translate_full_transcript_global(segments_data, source_lang="en"):
             try:
                 time.sleep(current_delay) 
                 response = client.models.generate_content(
-                    model='gemini-3.1-flash-lite-preview',
+                    model='gemini-2.5-flash',
                     contents=prompt,
                     config=types.GenerateContentConfig(response_mime_type="application/json")
                 )
@@ -851,7 +702,7 @@ def _extract_split_candidates(people, faces, w_f):
 
 
 
-def analyze_framing_high_precision_local(video_path, start_time, end_time, is_podcast=True, detector=None, face_detector=None):
+def analyze_framing_high_precision_local(video_path, start_time, end_time, is_podcast=True):
     """
     Motor de Framing Profesional (Shot-Based Decision).
     1. Detecta cortes de cámara exactos usando diferencias de luminancia (Matemática pura).
@@ -859,23 +710,23 @@ def analyze_framing_high_precision_local(video_path, start_time, end_time, is_po
     3. Bloquea el layout para toda la toma (Estabilidad total, cero parpadeo).
     """
     import mediapipe as mp
-    from mediapipe.tasks.python import vision
     
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     
-    # Manejo de detectores pre-cargados (Optimización de Flujo Invertido)
-    _should_close = False
-    if detector is None or face_detector is None:
-        model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "efficientdet_lite0.tflite")
-        face_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blaze_face_short_range.tflite")
-        
-        det_options = vision.ObjectDetectorOptions(base_options=mp.tasks.BaseOptions(model_asset_path=model_path), score_threshold=0.3)
-        face_options = vision.FaceDetectorOptions(base_options=mp.tasks.BaseOptions(model_asset_path=face_model_path), min_detection_confidence=0.4)
-        
-        detector = vision.ObjectDetector.create_from_options(det_options)
-        face_detector = vision.FaceDetector.create_from_options(face_options)
-        _should_close = True
+    # Configurar detectores MediaPipe (Una sola vez)
+    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "efficientdet_lite0.tflite")
+    face_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blaze_face_short_range.tflite")
+    
+    from mediapipe.tasks.python import vision
+    det_options = vision.ObjectDetectorOptions(
+        base_options=mp.tasks.BaseOptions(model_asset_path=model_path),
+        score_threshold=0.3
+    )
+    face_options = vision.FaceDetectorOptions(
+        base_options=mp.tasks.BaseOptions(model_asset_path=face_model_path),
+        min_detection_confidence=0.4
+    )
 
     start_frame = int(start_time * fps)
     total_frames_to_read = int((end_time - start_time) * fps)
@@ -918,64 +769,64 @@ def analyze_framing_high_precision_local(video_path, start_time, end_time, is_po
     logger.info("Fase 2: Aplicando decisiones por toma y analizando con IA...")
     final_segments = []
     
-    for j in range(len(cuts) - 1):
-        s_frame = cuts[j]
-        e_frame = cuts[j+1]
-        if (e_frame - s_frame) < 2: continue # Ignorar micro-escenas
+    with vision.ObjectDetector.create_from_options(det_options) as detector, \
+         vision.FaceDetector.create_from_options(face_options) as face_detector:
         
-        # Tomamos el frame central de esta toma para decidir el layout
-        mid_frame = s_frame + (e_frame - s_frame) // 2
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame + mid_frame)
-        ret, frame = cap.read()
-        if not ret: continue
-        
-        # Análisis con MediaPipe
-        h_f, w_f = frame.shape[:2]
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-        
-        p_res = detector.detect(mp_image)
-        f_res = face_detector.detect(mp_image)
-        
-        people = [d for d in p_res.detections if d.categories[0].category_name == 'person']
-        faces = f_res.detections
-        
-        layout = "single"
-        center = 0.5
-        center_top = 0.5
-        center_bottom = 0.5
-        
-        # Lógica de decisión Profesional (Podcast-First)
-        # Priorizamos caras si hay 2, o personas si hay 2.
-        if len(people) >= 2 or (len(faces) >= 2 and is_podcast):
-            layout = "split"
-            actors = sorted(people if len(people) >= 2 else faces, key=lambda d: d.bounding_box.origin_x)
-            center_top = (actors[0].bounding_box.origin_x + actors[0].bounding_box.width/2) / w_f
-            center_bottom = (actors[-1].bounding_box.origin_x + actors[-1].bounding_box.width/2) / w_f
-            center = center_top
-        elif len(people) == 1 or len(faces) == 1:
-            target = people[0] if len(people) == 1 else faces[0]
-            center = (target.bounding_box.origin_x + target.bounding_box.width/2) / w_f
-        
-        # Asegurar límites
-        center = max(0.1, min(0.9, center))
-        center_top = max(0.1, min(0.9, center_top))
-        center_bottom = max(0.1, min(0.9, center_bottom))
-        
-        # Creamos el segmento estable para TODA la toma
-        final_segments.append({
-            "start": s_frame / fps,
-            "end": e_frame / fps,
-            "layout": layout,
-            "center": center,
-            "center_top": center_top,
-            "center_bottom": center_bottom
-        })
+        for j in range(len(cuts) - 1):
+            s_frame = cuts[j]
+            e_frame = cuts[j+1]
+            if (e_frame - s_frame) < 2: continue # Ignorar micro-escenas
+            
+            # Tomamos el frame central de esta toma para decidir el layout
+            mid_frame = s_frame + (e_frame - s_frame) // 2
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame + mid_frame)
+            ret, frame = cap.read()
+            if not ret: continue
+            
+            # Análisis con MediaPipe
+            h_f, w_f = frame.shape[:2]
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+            
+            p_res = detector.detect(mp_image)
+            f_res = face_detector.detect(mp_image)
+            
+            people = [d for d in p_res.detections if d.categories[0].category_name == 'person']
+            faces = f_res.detections
+            
+            layout = "single"
+            center = 0.5
+            center_top = 0.5
+            center_bottom = 0.5
+            
+            # Lógica de decisión Profesional (Podcast-First)
+            # Priorizamos caras si hay 2, o personas si hay 2.
+            if len(people) >= 2 or (len(faces) >= 2 and is_podcast):
+                layout = "split"
+                actors = sorted(people if len(people) >= 2 else faces, key=lambda d: d.bounding_box.origin_x)
+                center_top = (actors[0].bounding_box.origin_x + actors[0].bounding_box.width/2) / w_f
+                center_bottom = (actors[-1].bounding_box.origin_x + actors[-1].bounding_box.width/2) / w_f
+                center = center_top
+            elif len(people) == 1 or len(faces) == 1:
+                target = people[0] if len(people) == 1 else faces[0]
+                center = (target.bounding_box.origin_x + target.bounding_box.width/2) / w_f
+            
+            # Asegurar límites
+            center = max(0.1, min(0.9, center))
+            center_top = max(0.1, min(0.9, center_top))
+            center_bottom = max(0.1, min(0.9, center_bottom))
+            
+            # Creamos el segmento estable para TODA la toma
+            final_segments.append({
+                "start": s_frame / fps,
+                "end": e_frame / fps,
+                "layout": layout,
+                "center": center,
+                "center_top": center_top,
+                "center_bottom": center_bottom
+            })
 
     cap.release()
-    if _should_close:
-        detector.close()
-        face_detector.close()
     
     # --- FASE 3: Limpieza y Retorno ---
     if not final_segments:
@@ -1048,7 +899,7 @@ def analyze_framing_multimodal_vision_gemini(video_path, start_time, end_time):
         
         time.sleep(10) # Pause to avoid rate limit
         response = client.models.generate_content(
-            model='gemini-3.1-flash-lite-preview', 
+            model='gemini-2.5-flash', 
             contents=[video_file, prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
@@ -1213,19 +1064,7 @@ if __name__ == "__main__":
 
         # 1. Download (Always download if URL provided)
         t_start = time.time()
-        
-        # --- MODO TEST: Si la URL es la palabra 'test', usamos input.mp4 local ---
-        if youtube_url and youtube_url.lower().strip() == "test":
-            logger.info("🧪 [MODO TEST] Usando 'input.mp4' local de la raíz del proyecto.")
-            if os.path.exists("input.mp4"):
-                import shutil
-                shutil.copy("input.mp4", INPUT_FILE)
-                video_file = INPUT_FILE
-                youtube_url = "Local Test File"
-            else:
-                logger.error("❌ MODO TEST: 'input.mp4' no encontrado en la raíz. Abortando.")
-                raise FileNotFoundError("'input.mp4' missing for test mode.")
-        elif youtube_url:
+        if youtube_url:
             video_file = download_video(youtube_url, INPUT_FILE)
         elif os.path.exists("input_full.mp4"):
             video_file = "input_full.mp4"
@@ -1234,7 +1073,6 @@ if __name__ == "__main__":
             # Fallback default
             youtube_url = "https://www.youtube.com/watch?v=okL1xL_hHOw"
             video_file = download_video(youtube_url, INPUT_FILE)
-        # --- FIN MODO TEST ---
         logger.info(f"   ✅ [PHASE 1] Download completed in {time.time() - t_start:.2f}s")
         
         # 1.5 NOTE: No proxy needed — analyze_framing_high_precision_local already
@@ -1278,18 +1116,6 @@ if __name__ == "__main__":
         # NO hard limit — clips are already filtered by score ≥ 4 in analyze_with_gemini
         logger.info(f"Processing {len(raw_clips)} clips that passed peak moment scoring (score ≥ 5)")
         
-        # 3.4 Inicialización ÚNICA de IA de Framing (Optimización de Flujo Invertido)
-        logger.info("Inicializando modelos de IA para framing (una sola carga)...")
-        from mediapipe.tasks.python import vision
-        model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "efficientdet_lite0.tflite")
-        face_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "blaze_face_short_range.tflite")
-        
-        det_options = vision.ObjectDetectorOptions(base_options=mp.tasks.BaseOptions(model_asset_path=model_path), score_threshold=0.3)
-        face_options = vision.FaceDetectorOptions(base_options=mp.tasks.BaseOptions(model_asset_path=face_model_path), min_detection_confidence=0.4)
-        
-        shared_detector = vision.ObjectDetector.create_from_options(det_options)
-        shared_face_detector = vision.FaceDetector.create_from_options(face_options)
-
         processed_clips = []
         
         for idx, analysis in enumerate(raw_clips):
@@ -1322,20 +1148,11 @@ if __name__ == "__main__":
                 if w['end'] > start_time and w['start'] < end_time
             ]
             
-            # 3.8 FIRST: Crop and Cut the physical clip (Lossless)
-            t_clip = time.time()
-            process_video_ffmpeg(video_file, V_OUT, start_time, end_time, A_OUT)
-            logger.info(f"      ✅ Clip extraction completed in {time.time() - t_clip:.2f}s")
-
-            # 3.9 SECOND: Framing on the extracted clip (Ahora Ultra Rápido con modelos compartidos)
+            # 3.8 Intelligent Framing (uses original video with internal 480px downscale for speed)
+            # CRITICAL: Using the original video (not a proxy) ensures correct FPS and frame timestamps.
+            # This matches the validate_universal_fix.py approach which produced perfect results.
             t_frame = time.time()
-            # Pasamos los detectores compartidos para no recargarlos
-            framing_data = analyze_framing_high_precision_local(
-                V_OUT, 0.0, end_time - start_time, 
-                is_podcast=is_podcast_global,
-                detector=shared_detector,
-                face_detector=shared_face_detector
-            )
+            framing_data = analyze_framing_high_precision_local(video_file, start_time, end_time, is_podcast=is_podcast_global)
             logger.info(f"      🎞️ Framing analysis completed in {time.time() - t_frame:.2f}s")
             
             # 3.85 Process B-roll Suggestions and Adjust Times
@@ -1346,7 +1163,7 @@ if __name__ == "__main__":
                         if 'time' in event:
                             event['time'] = max(0.0, float(event['time']) - start_time)
 
-            # 3.10 Store complete data for this clip
+            # 3.9 Store complete data for this clip
             clip_data = {
                 **analysis,
                 "duration": end_time - start_time,
@@ -1363,11 +1180,12 @@ if __name__ == "__main__":
                 "audio_url": os.path.basename(A_OUT)
             }
             
+            # 4. Crop and Cut the physical clip
+            t_clip = time.time()
+            process_video_ffmpeg(video_file, V_OUT, start_time, end_time, A_OUT)
+            logger.info(f"      ✂️ Clip extraction completed in {time.time() - t_clip:.2f}s")
+            
             processed_clips.append(clip_data)
-
-        # 4. Limpieza de IA
-        shared_detector.close()
-        shared_face_detector.close()
 
         # Fetch the original video title for the manifest
         video_title = "Unknown Video"
