@@ -1267,8 +1267,10 @@ def do_render_queue(version_id, clip_indices, preferredLanguage='es', proj_title
                     log_file.write(f"[RENDER] Running Remotion build for Clip #{idx+1}...\n")
                     log_file.flush()
                     
+                    # Using npx remotion render directly for better control + concurrency limit for Windows stability
+                    # Limiting to 4 instances prevents disk/CPU contention that often slows down Masive Rendering.
                     process = subprocess.Popen(
-                        ["npm", "run", "build"],
+                        ["npx", "remotion", "render", "src/index.ts", "ShortVideo", "out.mp4", f"--concurrency=4", "--force"],
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                         cwd=REMOTION_DIR, shell=True
                     )

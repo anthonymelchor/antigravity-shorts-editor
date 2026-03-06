@@ -121,7 +121,7 @@ export const Subtitles: React.FC<SubtitlesProps> = ({
                                 color,
                                 textShadow,
                                 transform,
-                                transition: 'all 0.1s ease-out', // Smooth transition between states
+                                // transition: 'all 0.1s ease-out', // Removed: Smooth transition between states causes slowdown in static render with no benefit.
                                 display: 'inline-block',
                                 lineHeight: '1.2',
                             }}

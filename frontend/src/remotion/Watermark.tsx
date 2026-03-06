@@ -13,7 +13,7 @@ export const Watermark: React.FC<WatermarkProps> = ({
     const normalizedText = (text || '').toString().trim().toLowerCase();
     const cleanText = normalizedText.replace(/^@/, '').trim();
 
-    if (!text || cleanText === 'Ninguno' || cleanText === 'none' || cleanText === '') {
+    if (!text || cleanText === 'ninguno' || cleanText === 'none' || cleanText === '') {
         return null;
     }
 
