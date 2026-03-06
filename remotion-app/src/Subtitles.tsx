@@ -50,11 +50,18 @@ export const Subtitles: React.FC<SubtitlesProps> = ({
     }, [words]);
 
     // Find the active chunk based on the current time
-    const activeChunk = chunks.find(chunk => {
+    const activeChunkIndex = chunks.findIndex((chunk, index) => {
         const firstWordStart = chunk[0].start;
-        const lastWordEnd = chunk[chunk.length - 1].end;
-        return currentTime >= firstWordStart && currentTime <= lastWordEnd;
+        const nextChunk = chunks[index + 1];
+
+        // Let the current text stay on screen during short pauses.
+        // It clears out ONLY if the next chunk starts or if the video ends.
+        const endTime = nextChunk ? nextChunk[0].start : chunk[chunk.length - 1].end + 0.5;
+
+        return currentTime >= firstWordStart && currentTime < endTime;
     });
+
+    const activeChunk = activeChunkIndex !== -1 ? chunks[activeChunkIndex] : null;
 
     if (!activeChunk) return null;
 

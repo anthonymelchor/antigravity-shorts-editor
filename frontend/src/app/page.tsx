@@ -27,7 +27,9 @@ import {
     Sparkles,
     Trash2,
     X,
-    Globe
+    Globe,
+    Clock,
+    Loader2
 } from 'lucide-react';
 import Link from 'next/link';
 import { createClientComponentClient } from '@supabase/auth-helpers-nextjs';
@@ -51,7 +53,9 @@ export default function Home() {
     const [preferredLanguage, setPreferredLanguage] = useState<'en' | 'es'>('es');
     const [projects, setProjects] = useState<any[]>([]);
     const [showDeleteModal, setShowDeleteModal] = useState<string | null>(null);
-    const [alert, setAlert] = useState<{ msg: string; type: 'error' | 'warning' } | null>(null);
+    const [showCancelModal, setShowCancelModal] = useState(false);
+    const [alert, setAlert] = useState<{ msg: string; type: 'error' | 'warning' | 'success' } | null>(null);
+    const [isRenderingNow, setIsRenderingNow] = useState(false);
     const [activeUrl, setActiveUrl] = useState<string | null>(null);
     const [currentVersion, setCurrentVersion] = useState<string | null>(null);
     const [accounts, setAccounts] = useState<any[]>([]);
@@ -158,8 +162,8 @@ export default function Home() {
     };
 
     useEffect(() => {
-        if (alert && alert.type === 'warning') {
-            const timer = setTimeout(() => setAlert(null), 6000);
+        if (alert && (alert.type === 'warning' || alert.type === 'success')) {
+            const timer = setTimeout(() => setAlert(null), alert.type === 'success' ? 4000 : 6000);
             return () => clearTimeout(timer);
         }
     }, [alert]);
@@ -167,7 +171,7 @@ export default function Home() {
     // Track playhead by polling every animation frame. 
     // We try 3 sources in order: <video> element, playerRef.getCurrentFrame(), nothing.
     useEffect(() => {
-        if (view !== 'results') return;
+        if (view !== 'results' && view !== 'editor') return;
         let rafId: number;
         let lastVal = -1;
 
@@ -195,16 +199,26 @@ export default function Home() {
 
             if (timeSec >= 0 && Math.abs(timeSec - lastVal) > 0.01) {
                 lastVal = timeSec;
-                const pct = Math.min(100, (timeSec / durationSec) * 100);
 
-                const lineEl = document.getElementById('rct-playhead-line');
-                if (lineEl) (lineEl as HTMLElement).style.left = pct + '%';
-
-                const labelEl = document.getElementById('rct-playhead-label');
-                if (labelEl) (labelEl as HTMLElement).textContent = timeSec.toFixed(1) + 's';
-
-                const inpEl = document.getElementById('rct-playhead-input') as HTMLInputElement | null;
-                if (inpEl && document.activeElement !== inpEl) inpEl.value = timeSec.toFixed(2);
+                if (view === 'results') {
+                    // Results view: update DOM directly (no React re-render overhead)
+                    const pct = Math.min(100, (timeSec / durationSec) * 100);
+                    const lineEl = document.getElementById('rct-playhead-line');
+                    if (lineEl) (lineEl as HTMLElement).style.left = pct + '%';
+                    const labelEl = document.getElementById('rct-playhead-label');
+                    if (labelEl) (labelEl as HTMLElement).textContent = timeSec.toFixed(1) + 's';
+                    const inpEl = document.getElementById('rct-playhead-input') as HTMLInputElement | null;
+                    if (inpEl && document.activeElement !== inpEl) inpEl.value = timeSec.toFixed(2);
+                } else if (view === 'editor') {
+                    // Editor view: update DOM directly to avoid Remotion Player props remounts (fixes stutter loop)
+                    const pct = Math.min(100, (timeSec / durationSec) * 100);
+                    const edLine = document.getElementById('rct-editor-playhead-line');
+                    if (edLine) (edLine as HTMLElement).style.left = pct + '%';
+                    const edLabel = document.getElementById('rct-editor-playhead-label');
+                    if (edLabel) (edLabel as HTMLElement).textContent = timeSec.toFixed(1) + 's';
+                    const edInp = document.getElementById('rct-editor-playhead-input') as HTMLInputElement | null;
+                    if (edInp && document.activeElement !== edInp) edInp.value = timeSec.toFixed(3);
+                }
             }
 
             rafId = requestAnimationFrame(tick);
@@ -216,25 +230,33 @@ export default function Home() {
 
     useEffect(() => {
         let interval: NodeJS.Timeout;
-        if (status.status !== 'idle' && status.status !== 'completed' && status.status !== 'failed') {
-            interval = setInterval(async () => {
-                try {
-                    const res = await authFetch(`${API_BASE}/api/status${status.version ? `?version=${status.version}` : ''}`);
-                    const data = await res.json();
-                    setStatus(data);
+        const currentId = transcript?.version || status.version;
 
-                    if ((data.status === 'completed' || data.status === 'failed') && String(data.version) === String(versionRef.current)) {
-                        processingRef.current = null;
-                        versionRef.current = null;
-                        setCurrentVersion(null);
-                        checkInitialStatus();
-                        fetchProjects();
-                    }
-                } catch (err) { console.error("Poll failed", err); }
-            }, 2000);
-        }
+        const poll = async () => {
+            try {
+                const url = currentId ? `${API_BASE}/api/status?version=${currentId}` : `${API_BASE}/api/status`;
+                const res = await authFetch(url);
+                const data = await res.json();
+
+                setStatus(prev => ({ ...prev, ...data }));
+
+                if (data.active_clips && data.active_clips.some((c: any) => c.status === 'completed')) {
+                    fetchProjects();
+                }
+
+                if ((data.status === 'completed' || data.status === 'failed') && versionRef.current && String(data.version) === String(versionRef.current)) {
+                    processingRef.current = null;
+                    versionRef.current = null;
+                    setCurrentVersion(null);
+                    checkInitialStatus();
+                }
+            } catch (err) { console.error("Poll failed", err); }
+        };
+
+        poll();
+        interval = setInterval(poll, 2500);
         return () => clearInterval(interval);
-    }, [status.status, status.version]);
+    }, [transcript?.version, view]);
 
     useEffect(() => {
         let interval: NodeJS.Timeout;
@@ -244,6 +266,54 @@ export default function Home() {
         }
         return () => clearInterval(interval);
     }, [view, isLaunching]);
+
+    const [renderStatus, setRenderStatus] = useState<any>(null);
+    useEffect(() => {
+        let active = true;
+        let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
+        const startStream = async () => {
+            if (view === 'editor' && transcript?.version && selectedClipIdx !== null) {
+                try {
+                    const params = new URLSearchParams({ version: transcript.version, idx: selectedClipIdx.toString() });
+                    const res = await authFetch(`${API_BASE}/api/render-stream?${params}`);
+                    if (!res.body) return;
+
+                    reader = res.body.getReader();
+                    const decoder = new TextDecoder();
+
+                    while (active) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+
+                        const chunk = decoder.decode(value, { stream: true });
+                        const lines = chunk.split('\n').filter(Boolean);
+                        for (const line of lines) {
+                            try {
+                                const data = JSON.parse(line);
+                                if (data.status && data.status !== 'idle') {
+                                    setRenderStatus(data);
+                                } else {
+                                    setRenderStatus(null);
+                                }
+                            } catch (e) { }
+                        }
+                    }
+                } catch (err) {
+                    if (active) setRenderStatus(null);
+                }
+            } else {
+                setRenderStatus(null);
+            }
+        };
+
+        startStream();
+
+        return () => {
+            active = false;
+            // if (reader) reader.cancel().catch(() => {}); // Optional tear down
+        };
+    }, [view, transcript?.version, selectedClipIdx]);
 
     const handleProcess = async () => {
         if (!url.trim()) return;
@@ -430,7 +500,23 @@ export default function Home() {
         }
 
         try {
-            setAlert({ msg: `Rendering ${indicesToRender.length} clip(s)...`, type: 'warning' });
+            setIsRenderingNow(true);
+            setAlert({ msg: `Preparando ${indicesToRender.length} clip(s)...`, type: 'success' });
+
+            // Optimistic update to immediately reflect the rendering state
+            setStatus((prev: any) => {
+                const newClips = prev.active_clips ? [...prev.active_clips] : [];
+                indicesToRender.forEach(renderIdx => {
+                    const versionStr = String(transcript.version);
+                    const existingIdx = newClips.findIndex((c: any) => c.version === `render_${versionStr}_${renderIdx}`);
+                    if (existingIdx !== -1) {
+                        newClips[existingIdx] = { ...newClips[existingIdx], status: 'queued', progress: 0 };
+                    } else {
+                        newClips.push({ status: 'queued', version: `render_${versionStr}_${renderIdx}`, progress: 0 });
+                    }
+                });
+                return { ...prev, active_clips: newClips, status: 'rendering' };
+            });
 
             const res = await authFetch(`${API_BASE}/api/render`, {
                 method: 'POST',
@@ -447,15 +533,46 @@ export default function Home() {
             const data = await res.json();
 
             if (data.message && data.message.includes("started")) {
-                setAlert({ msg: "¡Excelente! Hemos iniciado la fila de renderizado. Los clips aparecerán en tu panel principal en unos minutos.", type: 'warning' });
-                setView('dashboard');
-                fetchProjects();
+                setAlert({ msg: "¡Excelente! Hemos iniciado la fila de renderizado. Puedes ver el progreso en los clips.", type: 'success' });
+
+                // We keep them in selectedForRender for a moment to bridge the gap until polling catches up
+                setTimeout(() => {
+                    setSelectedForRender([]);
+                    fetchProjects();
+                }, 3000);
+
+                // Keep the button "off" for a moment to feel the click
+                setTimeout(() => setIsRenderingNow(false), 2000);
             } else {
                 setAlert({ msg: "Hubo un pequeño contratiempo al iniciar el render. Por favor, intenta de nuevo en un momento.", type: 'error' });
+                setIsRenderingNow(false);
             }
         } catch (err) {
             console.error("Render trigger failed", err);
             setAlert({ msg: "No pudimos conectar con el servidor de video. Revisa tu conexión e intenta otra vez.", type: 'error' });
+            setIsRenderingNow(false);
+        }
+    };
+
+    const handleCancelRender = async () => {
+        try {
+            const res = await authFetch(`${API_BASE}/api/cancel-render`, { method: 'POST' });
+            const data = await res.json();
+
+            if (data.status === 'success') {
+                setAlert({ msg: data.message, type: 'warning' });
+                // Optimistically clear the rendering status in UI
+                setStatus((prev: any) => ({ ...prev, active_clips: [], status: 'idle' }));
+                setIsRenderingNow(false);
+            } else {
+                setAlert({ msg: "El servidor no pudo cancelar la operación: " + (data.message || "Error desconocido"), type: 'warning' });
+            }
+        } catch (err) {
+            console.error("Cancel failed", err);
+            setAlert({ msg: "No se pudo conectar con el servidor para detener el render.", type: 'error' });
+        } finally {
+            setShowCancelModal(false);
+            setIsRenderingNow(false);
         }
     };
 
@@ -504,7 +621,34 @@ export default function Home() {
             // Normal cut logic
             if (!deletedCut && currentTimeMs > seg.start && currentTimeMs < seg.end) {
                 newSegments.push({ ...seg, end: currentTimeMs });
-                newSegments.push({ ...seg, start: currentTimeMs, layout: layoutToApply });
+
+                const newSeg: any = { ...seg, start: currentTimeMs, layout: layoutToApply };
+
+                // When forcing split, find the best center_top/center_bottom values available.
+                // Priority: existing split segment → clip-level → transcript root → sensible defaults.
+                // This ensures the forced split looks identical to an automatic AI-split.
+                if (layoutToApply === 'split') {
+                    const existingSplit = segments.find((s: any) => s.layout === 'split');
+                    newSeg.center_top =
+                        existingSplit?.center_top ??
+                        clip.center_top ??
+                        transcript?.center_top ??
+                        0.3;
+                    newSeg.center_bottom =
+                        existingSplit?.center_bottom ??
+                        clip.center_bottom ??
+                        transcript?.center_bottom ??
+                        0.7;
+                } else if (layoutToApply === 'single') {
+                    const existingSingle = segments.find((s: any) => s.layout === 'single');
+                    newSeg.center =
+                        existingSingle?.center ??
+                        clip.center ??
+                        transcript?.center ??
+                        0.5;
+                }
+
+                newSegments.push(newSeg);
             } else {
                 newSegments.push(seg);
             }
@@ -634,21 +778,67 @@ export default function Home() {
                         )}
                     </div>
                 </div>
-                <button
-                    onClick={() => handleRender()}
-                    disabled={selectedForRender.length === 0}
-                    className="px-6 py-2 bg-white hover:bg-neutral-200 text-black text-[10px] font-black uppercase tracking-widest rounded-xl disabled:opacity-30 transition-all shadow-[0_0_20px_rgba(255,255,255,0.1)] cursor-pointer">
-                    Render Selected ({selectedForRender.length})
-                </button>
+                <div className="flex items-center gap-4">
+                    {(((status as any).active_clips?.some((c: any) => c.status === 'rendering' || c.status === 'queued')) || isRenderingNow) && (
+                        <button
+                            onClick={() => setShowCancelModal(true)}
+                            className="flex items-center gap-3 px-6 py-4 bg-red-600/20 hover:bg-red-600/40 text-red-500 border border-red-500/30 rounded-2xl font-black uppercase text-[10px] tracking-widest transition-all shadow-2xl active:scale-95 cursor-pointer"
+                        >
+                            <X className="w-4 h-4" />
+                            Detener Todo
+                        </button>
+                    )}
+                    <button
+                        onClick={() => handleRender()}
+                        disabled={selectedForRender.length === 0 || isRenderingNow}
+                        className={`flex items-center gap-3 px-8 py-4 bg-white text-black rounded-2xl font-black uppercase text-[10px] tracking-widest transition-all shadow-2xl active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed ${isRenderingNow ? 'animate-pulse' : ''}`}
+                    >
+                        {isRenderingNow ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                            <Download className="w-4 h-4" />
+                        )}
+                        <span>{isRenderingNow ? 'Preparando...' : `Renderizar Seleccionados (${selectedForRender.length})`}</span>
+                    </button>
+                </div>
             </div>
 
             <div className="flex-1 overflow-y-auto p-12 bg-black custom-scrollbar">
-                <div className="max-w-6xl mx-auto flex flex-col gap-12 pb-24">
+                <div className="max-w-6xl mx-auto flex flex-col gap-12 pb-24 relative">
+                    {alert && (
+                        <div className="flex justify-center -mt-8 mb-[-1rem] relative z-[80]">
+                            <div className={`inline-flex items-center gap-2 border px-4 py-1.5 rounded-full animate-in fade-in slide-in-from-top-2 duration-500 shadow-xl transition-all
+                                ${alert.type === 'error' ? 'bg-red-500/10 border-red-500/20 text-red-400' :
+                                    alert.type === 'success' ? 'bg-[#0f291e]/90 backdrop-blur-md border-[#1b3d2f] text-[#4ade80]' :
+                                        'bg-amber-500/10 border-amber-500/20 text-amber-400'}`}>
+                                {alert.type === 'success' ? <Check className="w-3 h-3 shrink-0" /> : <ShieldAlert className="w-3 h-3 shrink-0 opacity-80" />}
+                                <p className="text-[10px] font-bold tracking-wide leading-none">
+                                    {alert.msg}
+                                </p>
+                            </div>
+                        </div>
+                    )}
+
                     {transcript?.clips?.map((clip: any, idx: number) => {
-                        const isSelected = selectedForRender.includes(idx);
-                        const toggleSelect = () => setSelectedForRender(prev =>
-                            prev.includes(idx) ? prev.filter(i => i !== idx) : [...prev, idx]
+                        const activeRenders = (status as any).active_clips || [];
+                        const versionStr = String(transcript.version);
+                        const clipRenderStatus = activeRenders.find((r: any) =>
+                            String(r.version) === `render_${versionStr}_${idx}` ||
+                            String(r.version).includes(`render_${versionStr}_${idx}`)
                         );
+
+                        const isActuallyRenderingServer = !!(clipRenderStatus && (clipRenderStatus.status === 'rendering' || clipRenderStatus.status === 'queued'));
+                        const isRenderingOptimistic = selectedForRender.includes(idx) && isRenderingNow;
+                        const isRendering = !!(isActuallyRenderingServer || isRenderingOptimistic);
+
+                        // Requirement #1: Block checkbox if rendering, and keep it checked
+                        const isSelected = !!(selectedForRender.includes(idx) || isActuallyRenderingServer);
+                        const toggleSelect = () => {
+                            if (isRendering) return;
+                            setSelectedForRender(prev =>
+                                prev.includes(idx) ? prev.filter(i => i !== idx) : [...prev, idx]
+                            );
+                        };
 
                         return (
                             <div key={idx} className="flex gap-10 items-start">
@@ -670,15 +860,55 @@ export default function Home() {
                                 </div>
 
                                 <div className="flex-1 bg-[#0a0a0a] rounded-[2.5rem] border border-white/5 flex flex-col overflow-hidden shadow-2xl relative">
+                                    {/* Requirement #2: Loading bar inside the card */}
+                                    {/* Requirement #2: Loading bar inside the card - ONLY when actively rendering */}
+                                    {isRendering && clipRenderStatus?.status === 'rendering' && (
+                                        <div className="absolute top-0 left-0 right-0 h-[4px] bg-white/5 z-[60] overflow-hidden">
+                                            <div
+                                                className="h-full transition-all duration-700 ease-out bg-sky-400 shadow-[0_0_25px_rgba(14,165,233,1)]"
+                                                style={{ width: `${clipRenderStatus?.progress || 5}%` }}
+                                            />
+                                        </div>
+                                    )}
+
                                     <div className="h-16 border-b border-white/5 flex items-center justify-between px-8 bg-[#0c0c0c]">
                                         <div className="flex items-center gap-4">
-                                            <label className="relative flex cursor-pointer items-center justify-center p-2 group">
-                                                <input type="checkbox" className="peer sr-only" checked={isSelected} onChange={toggleSelect} />
-                                                <div className="w-6 h-6 rounded-md border-2 border-white/20 peer-checked:bg-white peer-checked:border-white transition-all flex items-center justify-center group-hover:border-white/40">
-                                                    {isSelected && <Check className="w-4 h-4 text-black" />}
+                                            <div className="relative flex items-center justify-center p-2 w-10 h-10">
+                                                <label className={`group flex items-center justify-center w-full h-full ${isRendering ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}>
+                                                    <input
+                                                        type="checkbox"
+                                                        className="peer sr-only"
+                                                        checked={isSelected}
+                                                        onChange={toggleSelect}
+                                                        disabled={isRendering}
+                                                    />
+                                                    <div className={`w-6 h-6 rounded-md border-2 transition-all flex items-center justify-center ${isSelected ? 'bg-white border-white shadow-[0_0_15px_rgba(255,255,255,0.4)]' : 'border-white/20 group-hover:border-white/40'}`}>
+                                                        {isSelected && <Check className="w-4 h-4 text-black" />}
+                                                    </div>
+                                                </label>
+                                            </div>
+                                            <div className="flex flex-col">
+                                                <div className="flex items-center gap-2">
+                                                    <h3 className="text-sm font-normal truncate max-w-[400px] text-white/90">{clip.title || `Segment #${idx + 1}`}</h3>
+                                                    {isRendering && clipRenderStatus?.status === 'queued' && (
+                                                        <span className="bg-amber-500 text-white px-2 py-0.5 rounded-full animate-pulse text-[8px] font-black uppercase tracking-tight flex items-center gap-1">
+                                                            <Clock className="w-3 h-3" />
+                                                            EN COLA
+                                                        </span>
+                                                    )}
+                                                    {isRendering && clipRenderStatus?.status === 'rendering' && (
+                                                        <span className="bg-sky-500/20 border border-sky-400/30 text-sky-400 px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-tight flex items-center gap-1">
+                                                            <Loader2 className="w-3 h-3 animate-spin" />
+                                                            RENDERIZANDO
+                                                        </span>
+                                                    )}
                                                 </div>
-                                            </label>
-                                            <h3 className="text-sm font-bold truncate max-w-[500px] text-white/90">{clip.title || `Segment #${idx + 1}`}</h3>
+                                                {isRendering && (
+                                                    <span className={`text-[9px] font-black uppercase tracking-widest ${clipRenderStatus?.status === 'rendering' ? 'text-sky-400' : 'text-amber-500'}`}>
+                                                        {clipRenderStatus?.status === 'rendering' ? `Renderizando... ${clipRenderStatus?.progress}%` : 'Esperando turno...'}
+                                                    </span>
+                                                )}
+                                            </div>
                                         </div>
                                         <div className="flex items-center gap-3">
                                             <button
@@ -705,6 +935,9 @@ export default function Home() {
                                                     durationInFrames={Math.ceil((clip.end - clip.start || 30) * 30)}
                                                     compositionWidth={1080} compositionHeight={1920} fps={30}
                                                     style={{ width: '100%', height: '100%', objectFit: 'contain' }} controls
+                                                    // PERFORMANCE FIXES FOR PREVIEW LOOP (STUTTERING)
+                                                    bufferStateDelayInMilliseconds={0}
+                                                    renderLoading={() => <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-white text-[10px] animate-pulse">Buffering...</div>}
                                                     inputProps={{
                                                         transcript: { ...transcript, ...clip },
                                                         isPlayer: true,
@@ -831,18 +1064,6 @@ export default function Home() {
                     </div>
                 </div>
 
-                {alert && (
-                    <div className={`mt-6 w-full flex items-center gap-4 border py-5 px-8 rounded-[2.5rem] animate-in fade-in slide-in-from-top-2 duration-500 shadow-2xl transition-colors
-            ${alert.type === 'error' ? 'bg-red-500/10 border-red-500/10 text-red-500/90' : 'bg-amber-500/10 border-amber-500/10 text-amber-500/90'}`}>
-                        <ShieldAlert className="w-5 h-5 shrink-0 opacity-70" />
-                        <p className="flex-1 text-[11px] font-bold tracking-tight">
-                            {alert.msg}
-                        </p>
-                        <button onClick={() => setAlert(null)} className="p-1.5 hover:bg-white/10 rounded-full transition-all">
-                            <Check className="w-4 h-4" />
-                        </button>
-                    </div>
-                )}
             </div>
 
             {/* PROJECT LIST HEADER & FILTER */}
@@ -879,21 +1100,23 @@ export default function Home() {
 
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                     {Array.isArray(projects) && projects.filter(p => !nicheFilter || p.niche === nicheFilter).map((proj) => {
-                        const isProcessing = proj.isActive;
+                        const isRenderingTask = proj.status === 'rendering';
+                        const isInitialProcessing = proj.isActive && !isRenderingTask;
                         const isFailed = proj.status === 'failed';
 
                         return (
                             <div
                                 key={proj.version}
-                                onClick={() => !isProcessing && !isFailed && loadProject(proj.version)}
-                                className={`relative group h-48 rounded-[2rem] border overflow-hidden p-8 flex flex-col justify-end transition-all cursor-pointer 
-                ${isProcessing ? 'border-sky-500/50 bg-sky-950/20 cursor-wait' :
-                                        isFailed ? 'border-red-500/20 bg-red-950/10 cursor-default' :
-                                            'border-white/5 bg-neutral-900/50 hover:border-white/20 hover:scale-[1.02]'}`}
+                                onClick={() => (proj.canOpen && !isFailed) && loadProject(proj.version)}
+                                className={`relative group h-48 rounded-[2rem] border overflow-hidden p-8 flex flex-col justify-end transition-all 
+                ${isInitialProcessing ? 'border-sky-500/50 bg-sky-950/20 shadow-[0_0_30px_rgba(14,165,233,0.1)]' :
+                                        isFailed ? 'border-red-500/20 bg-red-950/10' :
+                                            'border-white/5 bg-neutral-900/50 hover:border-white/20 hover:scale-[1.02]'}
+                ${proj.canOpen && !isFailed ? 'cursor-pointer' : 'cursor-wait'}`}
                             >
                                 <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent z-10" />
 
-                                {!isProcessing && (
+                                {!proj.isActive && (
                                     <button
                                         onClick={(e) => {
                                             e.stopPropagation();
@@ -910,7 +1133,7 @@ export default function Home() {
                                 )}
 
                                 <div className="absolute inset-0 flex items-center justify-center opacity-[0.03] z-0">
-                                    <Youtube className={`w-32 h-32 ${isProcessing ? 'animate-pulse text-sky-400' : ''}`} />
+                                    <Youtube className={`w-32 h-32 ${proj.isActive ? 'animate-pulse text-sky-400' : ''}`} />
                                 </div>
 
                                 <div className="relative z-20">
@@ -922,13 +1145,18 @@ export default function Home() {
                                             <div className="flex justify-between items-center">
                                                 <span>{new Date(proj.timestamp * 1000).toLocaleDateString()} • {new Date(proj.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}</span>
                                                 {proj.status === 'completed' && proj.total_clips > 0 && (
-                                                    <span className="text-[9px] font-bold text-neutral-400">
-                                                        {proj.published_count}/{proj.total_clips} publicados
+                                                    <span className={`text-[9px] font-bold ${isRenderingTask ? 'text-sky-400' : 'text-neutral-400'}`}>
+                                                        {proj.published_count}/{proj.total_clips} publicados {isRenderingTask && "• Renderizando..."}
                                                     </span>
                                                 )}
-                                                {isProcessing && (
+                                                {isInitialProcessing && (
                                                     <span className={`${proj.status === 'queued' ? 'bg-amber-500' : 'bg-sky-500'} text-white px-2 py-0.5 rounded-full animate-pulse text-[8px] tracking-tight`}>
                                                         {proj.status === 'queued' ? 'EN COLA' : 'EN PROCESO'}
+                                                    </span>
+                                                )}
+                                                {isRenderingTask && (
+                                                    <span className="bg-sky-500 shadow-[0_0_15px_rgba(14,165,233,0.8)] text-white px-2 py-0.5 rounded-full animate-pulse text-[8px] tracking-tight font-black uppercase">
+                                                        RENDERIZANDO
                                                     </span>
                                                 )}
                                                 {isFailed && <span className="bg-red-500/80 text-white px-2 py-0.5 rounded-full text-[8px] tracking-tight font-black">ERROR</span>}
@@ -944,7 +1172,7 @@ export default function Home() {
                                         </h4>
                                     </div>
 
-                                    {isProcessing && proj.status !== 'queued' && (
+                                    {isInitialProcessing && proj.status !== 'queued' && (
                                         <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden mt-2">
                                             <div
                                                 className="h-full bg-sky-500 transition-all duration-500"
@@ -952,12 +1180,12 @@ export default function Home() {
                                             />
                                         </div>
                                     )}
-                                    {isProcessing && proj.status === 'queued' && (
+                                    {isInitialProcessing && proj.status === 'queued' && (
                                         <p className="text-[10px] font-medium text-neutral-500 mt-2 uppercase tracking-tight">Esperando turno...</p>
                                     )}
                                 </div>
 
-                                {!isProcessing && !isFailed && (
+                                {!proj.isActive && !isFailed && (
                                     <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20 p-5 bg-white/10 backdrop-blur-md rounded-full shadow-2xl opacity-0 group-hover:opacity-100 transition-all scale-50 group-hover:scale-100 cursor-pointer">
                                         <Play className="w-6 h-6 fill-white" />
                                     </div>
@@ -968,38 +1196,10 @@ export default function Home() {
                 </div>
             </div>
 
-            {showDeleteModal && (
-                <div className="fixed inset-0 z-[100] bg-black/95 backdrop-blur-sm flex items-center justify-center p-6 animate-in fade-in duration-300">
-                    <div className="max-w-md w-full bg-[#0a0a0a] border border-white/10 p-12 rounded-[3.5rem] text-center shadow-[0_0_100px_rgba(0,0,0,1)]">
-                        <div className="w-20 h-20 bg-red-500/10 rounded-full flex items-center justify-center mx-auto mb-8">
-                            <ShieldAlert className="w-10 h-10 text-red-500" />
-                        </div>
-                        <h2 className="text-3xl font-black uppercase text-white mb-4 tracking-tighter">Destruir Proyecto</h2>
-                        <p className="text-neutral-500 text-xs mb-10 leading-relaxed font-medium uppercase tracking-widest">
-                            ¿Confirmas la eliminación permanente de este nodo de datos? Esta acción es irreversible.
-                        </p>
-                        <div className="flex gap-4">
-                            <button
-                                onClick={() => setShowDeleteModal(null)}
-                                className="flex-1 px-8 py-4 bg-white/5 hover:bg-white/10 text-white font-black rounded-2xl uppercase text-[10px] tracking-widest transition-all cursor-pointer"
-                            >
-                                Cancelar
-                            </button>
-                            <button
-                                onClick={() => handleDeleteProject(showDeleteModal)}
-                                className="flex-1 bg-white text-black font-black py-4 rounded-2xl uppercase text-[10px] tracking-widest transition-all shadow-2xl"
-                            >
-                                Eliminar
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
             <footer className="py-24 text-center opacity-5 select-none pointer-events-none">
                 <h2 className="text-[12rem] font-black tracking-[ -0.05em] uppercase italic">RocotoClip</h2>
             </footer>
-        </main>
+        </main >
     );
 
     const editorView = (
@@ -1028,9 +1228,20 @@ export default function Home() {
                     </div>
                     <button
                         onClick={() => handleRender(selectedClipIdx)}
-                        className="bg-white text-black px-6 py-2 rounded-xl text-[10px] font-black uppercase hover:bg-neutral-200 transition-all cursor-pointer"
+                        disabled={renderStatus?.status === 'rendering' || renderStatus?.status === 'queued'}
+                        className={`px-6 py-2 rounded-xl text-[10px] font-black uppercase transition-all flex items-center gap-2 ${renderStatus?.status === 'rendering' || renderStatus?.status === 'queued' ? 'bg-white/10 text-white/50 cursor-not-allowed' : 'bg-white text-black hover:bg-neutral-200 cursor-pointer'}`}
                     >
-                        Final Render
+                        {renderStatus?.status === 'rendering' ? (
+                            <>
+                                <Loader2 className="w-3 h-3 animate-spin" /> Renderizando...
+                            </>
+                        ) : renderStatus?.status === 'queued' ? (
+                            <>
+                                <Clock className="w-3 h-3" /> En Cola
+                            </>
+                        ) : (
+                            'Final Render'
+                        )}
                     </button>
                 </div>
             </nav>
@@ -1038,13 +1249,16 @@ export default function Home() {
             <div className="flex-1 flex overflow-hidden">
                 <div className="flex-1 flex flex-col bg-[#050505] overflow-hidden border-r border-white/5">
                     <div className="flex-1 flex items-center justify-center min-h-0 p-8">
-                        <div className="h-full aspect-[9/16] bg-black rounded-[2rem] overflow-hidden shadow-2xl border border-white/5">
+                        <div className="h-full aspect-[9/16] bg-black rounded-[2rem] overflow-hidden shadow-2xl border border-white/5 relative">
                             <Player
                                 ref={playerRef}
                                 component={Main}
                                 durationInFrames={Math.ceil((transcript?.clips?.[selectedClipIdx]?.duration || 30) * 30)}
                                 compositionWidth={1080} compositionHeight={1920} fps={30}
                                 style={{ width: '100%', height: '100%' }} controls
+                                // PERFORMANCE FIXES FOR PREVIEW LOOP (STUTTERING)
+                                bufferStateDelayInMilliseconds={0}
+                                renderLoading={() => <div className="absolute inset-0 flex items-center justify-center bg-[#050505]/90 backdrop-blur-md text-white font-black text-xs uppercase tracking-[0.2em] animate-pulse">Cargando Frame...</div>}
                                 inputProps={{
                                     transcript: { ...transcript, ...transcript?.clips?.[selectedClipIdx] },
                                     isPlayer: true,
@@ -1054,6 +1268,30 @@ export default function Home() {
                                     token: authToken
                                 }}
                             />
+
+                            {/* Render Status Overlay/Indicator under player */}
+                            {(renderStatus?.status === 'rendering' || renderStatus?.status === 'queued') && (
+                                <div className="absolute bottom-4 left-4 right-4 bg-[#0a0a0a]/90 backdrop-blur-md rounded-xl border border-white/10 p-3 shadow-2xl z-50 transform transition-all">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <div className="flex items-center gap-2">
+                                            {renderStatus?.status === 'rendering' ? <Loader2 className="w-4 h-4 text-sky-400 animate-spin" /> : <Clock className="w-4 h-4 text-amber-400" />}
+                                            <span className="text-[10px] font-black uppercase tracking-widest text-white">
+                                                {renderStatus?.status === 'rendering' ? 'Renderizando clip' : 'En cola de espera'}
+                                            </span>
+                                        </div>
+                                        <span className="text-[10px] tabular-nums font-bold text-neutral-400">
+                                            {renderStatus?.status === 'rendering' ? `${renderStatus.progress}%` : '...'}
+                                        </span>
+                                    </div>
+                                    <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden">
+                                        <div
+                                            className={`h-full ${renderStatus?.status === 'queued' ? 'bg-amber-400 opacity-50' : 'bg-sky-400'} transition-all duration-500`}
+                                            style={{ width: renderStatus?.status === 'queued' ? '100%' : `${renderStatus.progress || 0}%` }}
+                                        />
+                                    </div>
+                                    <p className="text-[8px] text-neutral-500 mt-2 truncate font-medium">{renderStatus.message || 'Procesando...'}</p>
+                                </div>
+                            )}
                         </div>
                     </div>
 
@@ -1071,7 +1309,7 @@ export default function Home() {
                         </div>
 
                         <div className="flex-1 rounded-xl bg-[#050505] border border-white/5 relative overflow-x-auto overflow-y-hidden custom-scrollbar">
-                            <div style={{ minWidth: `${timelineZoom * 100}%` }} className="h-full relative flex flex-col justify-end pb-4 group">
+                            <div style={{ minWidth: `${timelineZoom * 100}%` }} className="h-full relative flex flex-col justify-center group">
 
                                 <div className="h-8 w-full relative shrink-0">
                                     <div className="absolute inset-0 flex overflow-hidden opacity-90 transition-opacity">
@@ -1090,31 +1328,34 @@ export default function Home() {
 
                                 {(playerRef.current || currentFrame >= 0) && (
                                     <div
+                                        id="rct-editor-playhead-line"
                                         className="absolute top-0 bottom-0 w-[1px] bg-red-500 z-20 pointer-events-none shadow-[0_0_10px_rgba(239,68,68,0.3)] transition-none"
-                                        style={{
-                                            left: `${((currentFrame / 30) / (transcript?.clips?.[selectedClipIdx]?.duration || 30)) * 100}%`
-                                        }}
+                                    // Left is fully controlled by the native tick() animation frame to prevent react re-render snapping
                                     >
                                         <div className="absolute top-2 -translate-x-1/2 flex flex-col items-center">
                                             <svg width="12" height="16" viewBox="0 0 12 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                                                 <path d="M0 2C0 0.89543 0.89543 0 2 0H10C11.1046 0 12 0.89543 12 2V10L6 16L0 10V2Z" fill="#ef4444" />
                                             </svg>
-                                            <div className="text-[10px] text-red-500 font-bold mt-1 bg-black/50 px-1 rounded tabular-nums">
-                                                {(currentFrame / 30).toFixed(1)}s
+                                            <div id="rct-editor-playhead-label" className="text-[10px] text-red-500 font-bold mt-1 bg-black/50 px-1 rounded tabular-nums">
+                                                0.0s
                                             </div>
                                         </div>
                                     </div>
                                 )}
 
                                 <input
+                                    id="rct-editor-playhead-input"
                                     type="range"
                                     min="0"
                                     max={transcript?.clips?.[selectedClipIdx]?.duration || 30}
-                                    step="0.01"
-                                    value={currentFrame / 30}
+                                    step={1 / 30}
+                                    defaultValue={currentFrame / 30}
                                     onChange={(e) => {
                                         const time = parseFloat(e.target.value);
-                                        playerRef.current?.seekTo(Math.floor(time * 30));
+                                        const frame = Math.round(time * 30);
+                                        playerRef.current?.seekTo(frame);
+                                        // Immediately update state so the red line reflects the drag position
+                                        setCurrentFrame(frame);
                                     }}
                                     className="absolute inset-0 w-full h-full opacity-0 cursor-ew-resize z-30 m-0"
                                 />
@@ -1215,6 +1456,68 @@ export default function Home() {
                 {view === 'results' && resultsLayout}
                 {view === 'editor' && editorView}
             </div>
+
+            {/* GLOBAL MODALS */}
+            {
+                showDeleteModal && (
+                    <div className="fixed inset-0 z-[300] flex items-center justify-center p-8 backdrop-blur-3xl bg-black/80 animate-in fade-in duration-500">
+                        <div className="bg-[#050505] border border-white/5 rounded-[3rem] p-12 max-w-lg w-full shadow-[0_40px_100px_rgba(0,0,0,1)] border-t-white/10">
+                            <div className="w-20 h-20 bg-white/5 rounded-[1.5rem] flex items-center justify-center mb-8 border border-white/5">
+                                <Trash2 className="w-10 h-10 text-white" />
+                            </div>
+                            <h2 className="text-3xl font-black tracking-tighter text-white mb-4 uppercase italic">¿Eliminar Proyecto?</h2>
+                            <p className="text-neutral-500 text-xs mb-10 leading-relaxed font-medium uppercase tracking-widest">
+                                Esta acción es irreversible y eliminará todos los archivos, clips y análisis asociados a este video de forma permanente.
+                            </p>
+                            <div className="flex gap-4">
+                                <button
+                                    onClick={() => setShowDeleteModal(null)}
+                                    className="flex-1 px-8 py-4 bg-white/5 hover:bg-white/10 text-white font-black rounded-2xl uppercase text-[10px] tracking-widest transition-all cursor-pointer"
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    onClick={() => handleDeleteProject(showDeleteModal)}
+                                    className="flex-1 bg-white text-black font-black py-4 rounded-2xl uppercase text-[10px] tracking-widest transition-all shadow-2xl"
+                                >
+                                    Eliminar
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )
+            }
+
+            {
+                showCancelModal && (
+                    <div className="fixed inset-0 z-[300] flex items-center justify-center p-8 backdrop-blur-3xl bg-black/80 animate-in fade-in duration-500">
+                        <div className="bg-[#050505] border border-white/5 rounded-[3rem] p-12 max-w-lg w-full shadow-[0_40px_100px_rgba(0,0,0,1)] border-t-white/10">
+                            <div className="w-20 h-20 bg-red-500/20 rounded-[1.5rem] flex items-center justify-center mb-8 border border-red-500/30">
+                                <ShieldAlert className="w-10 h-10 text-red-500" />
+                            </div>
+                            <h2 className="text-3xl font-black tracking-tighter text-white mb-4 uppercase italic">Detener Renderizado</h2>
+                            <p className="text-neutral-500 text-xs mb-10 leading-relaxed font-medium uppercase tracking-widest">
+                                ¿Confirmas que deseas detener todos los procesos de renderizado en curso? Esta acción cancelará las tareas actuales y limpiará la cola de espera.
+                            </p>
+                            <div className="flex gap-4">
+                                <button
+                                    onClick={() => setShowCancelModal(false)}
+                                    className="flex-1 px-8 py-4 bg-white/5 hover:bg-white/10 text-white font-black rounded-2xl uppercase text-[10px] tracking-widest transition-all cursor-pointer"
+                                >
+                                    Continuar Renderizado
+                                </button>
+                                <button
+                                    onClick={handleCancelRender}
+                                    className="flex-1 bg-red-600 text-white font-black py-4 rounded-2xl uppercase text-[10px] tracking-widest transition-all shadow-2xl"
+                                >
+                                    Detener Todo
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )
+            }
+
 
             <style jsx global>{`
         body { background: black; overflow-x: hidden; }

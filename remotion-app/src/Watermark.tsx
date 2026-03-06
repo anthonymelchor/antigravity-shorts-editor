@@ -10,6 +10,13 @@ export const Watermark: React.FC<WatermarkProps> = ({
     text = 'ROCOTOCLIP',
     opacity = 1
 }) => {
+    const normalizedText = (text || '').toString().trim().toLowerCase();
+    const cleanText = normalizedText.replace(/^@/, '').trim();
+
+    if (!text || cleanText === 'Ninguno' || cleanText === 'none' || cleanText === '') {
+        return null;
+    }
+
     return (
         <AbsoluteFill style={{
             justifyContent: 'flex-end',
@@ -27,7 +34,7 @@ export const Watermark: React.FC<WatermarkProps> = ({
                 textTransform: 'lowercase',
                 textShadow: '0 2px 10px rgba(0,0,0,0.3)', // Even softer shadow
             }}>
-                {text}
+                {text.startsWith('@') ? text : `@${text}`}
             </div>
         </AbsoluteFill>
     );

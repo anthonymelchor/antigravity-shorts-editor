@@ -143,7 +143,9 @@ HARDCODED_ACCOUNTS = [
     {"id": 2, "name": "reinventatemujer_", "niche": "Empoderamiento y Amor Propio Femenino"},
     {"id": 3, "name": "melchor_ia", "niche": "IA y Futuro"},
     {"id": 4, "name": "reglas.del.amor", "niche": "Relaciones y Psicología Masc."},
-    {"id": 5, "name": "the_manifest_path", "niche": "Manifestación y Espiritualidad"}
+    {"id": 5, "name": "the_manifest_path", "niche": "Manifestación y Espiritualidad"},
+    {"id": 6, "name": "juanlondono.marketing", "niche": "marketing digital"},
+    {"id": 7, "name": "Ninguno", "niche": "sin etiqueta"}
 ]
 
 def get_account_by_id(account_id):
@@ -386,11 +388,21 @@ ALLOWED_MEDIA_EXTENSIONS = {".mp4", ".wav", ".webm", ".jpg", ".png"}
 # Consolidated Media Serving moved to the bottom for clarity and hierarchy.
 
 
-# State management
 # Multi-process Registry
 active_processes = {} # version_id -> ProcessingState
+active_render_procs = {} # key -> subprocess.Popen object
+render_batch_canceled = set() # version_id -> True
 processes_lock = threading.Lock()
 process_semaphore = threading.Semaphore(1) # Only process 1 video at a time for efficiency
+
+def format_duration(seconds):
+    """Formats seconds into 'X min Y seg' or 'X seg'."""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds} seg"
+    mins = seconds // 60
+    secs = seconds % 60
+    return f"{mins} min {secs} seg"
 
 class ProcessRequest(BaseModel):
     url: str
@@ -431,6 +443,7 @@ def get_or_create_state(version_id, url="", user_id=None, niche=None):
     with processes_lock:
         if version_id not in active_processes:
             active_processes[version_id] = ProcessingState(url=url, user_id=user_id, niche=niche)
+            active_processes[version_id].version = version_id
         # Always ensure user_id is updated if we have a fresh one (resilience)
         if user_id:
             active_processes[version_id].user_id = user_id
@@ -544,7 +557,15 @@ def run_pipeline(url: str, version: int, niche: Optional[str] = None):
                     process.wait()
 
                     if process.returncode == 0:
-                        print(f"[END] Process {version} completed successfully.")
+                        end_time = time.time()
+                        total_duration = end_time - state.started_at
+                        duration_str = format_duration(total_duration)
+                        
+                        finish_msg = f"[END] Process {version} completed successfully in {duration_str}."
+                        print(finish_msg)
+                        log_file.write(f"\n{finish_msg}\n")
+                        log_file.flush()
+                        
                         state.status = "completed"
                         state.progress = 100
                         
@@ -850,6 +871,10 @@ async def list_projects(request: Request):
             if state.status == "completed": continue
             if state.user_id != user_id:
                 continue
+            
+            # Skip sub-tasks (renders) as they are handled within the parent project card logic below
+            if str(v).startswith("render_"):
+                continue
                 
             item = state.to_dict()
             # Global priority logic: only the oldest active in SYSTEM is "active"
@@ -857,6 +882,7 @@ async def list_projects(request: Request):
                 if item["status"] == "queued": # Only set message if still in queue
                     item["message"] = "En cola de espera (Gubernamental)..."
             
+            item["canOpen"] = False # New projects cannot be opened until transcript exists
             projects.append(item)
 
     # 3. Gather completed projects from projects/ directory
@@ -890,21 +916,46 @@ async def list_projects(request: Request):
                     total_clips = len(clips)
                     published_clips = sum(1 for c in clips if c.get("published"))
 
+                    # Check if project has active renders
+                    render_keys = [k for k, s in active_processes.items() if str(k).startswith(f"render_{version}_") and s.status in ["queued", "rendering"]]
+                    
+                    is_rendering = bool(render_keys)
+                    render_progress = 0
+                    render_status = "completed"
+                    render_msg = "Completed"
+                    
+                    if is_rendering:
+                        active_renders = [active_processes[k] for k in render_keys]
+                        # Only report as rendering if at least one is actually rendering. Else queued.
+                        if any(r.status == "rendering" for r in active_renders):
+                            render_status = "rendering"
+                            # Average progress of rendering clips, min 5 to show bar
+                            render_progress = max(5, int(sum(r.progress for r in active_renders) / len(active_renders)))
+                            render_msg = "Renderizando clips..."
+                        else:
+                            render_status = "queued"
+                            render_progress = 0
+                            render_msg = "En cola de renderizado..."
+
                     projects.append({
                         "version": version,
                         "title": data.get("video_title") or (clips[0].get("title") if clips else f"Project {version}"),
-                        "status": "completed", 
+                        "status": "rendering" if is_rendering else "completed", # Always 'rendering' on dashboard
+                        "realStatus": render_status if is_rendering else "completed", # Detailed status for internal use
+                        "message": "Renderizando..." if is_rendering else "Ready",
+                        "progress": render_progress,
                         "timestamp": int(version) if version.isdigit() else 0,
-                        "isActive": False,
+                        "isActive": is_rendering,
                         "niche": niche,
                         "published_count": published_clips,
-                        "total_clips": total_clips
+                        "total_clips": total_clips,
+                        "canOpen": True # Existing projects can always be opened
                     })
                 except: continue
     except: pass
             
-    # 4. Global Priority Sort: Active first (by newest timestamp), then completed (newest first)
-    projects.sort(key=lambda x: (not x.get("isActive", False), -float(x.get("timestamp", 0))))
+    # 4. Global Priority Sort: Completed projects (newest first). Active processes do not jump to top.
+    projects.sort(key=lambda x: -float(x.get("timestamp", 0)))
     return projects
 
 @app.delete("/api/project/{version}")
@@ -972,11 +1023,43 @@ async def get_status(request: Request, version: Optional[str] = None):
     
     # Returns the status of a specific version, or the most recent active one
     with processes_lock:
-        if version and version in active_processes:
-            state = active_processes[version]
-            if state.user_id and state.user_id != user_id:
-                raise HTTPException(status_code=403, detail="Unauthorized")
-            return state.to_dict()
+        if version:
+            v_norm = str(version)
+            # Check for batch render tasks
+            project_renders = []
+            for k, s in active_processes.items():
+                k_str = str(k)
+                if k_str.startswith(f"render_{v_norm}_"):
+                    project_renders.append(s.to_dict())
+            
+            if project_renders:
+                # If there are renders (active or completed), return them.
+                active_sum = [r for r in project_renders if r["status"] in ["queued", "rendering"]]
+                
+                # Determine overall status: rendering > queued > completed
+                overall_status = "completed"
+                if any(r["status"] == "rendering" for r in project_renders):
+                    overall_status = "rendering"
+                elif any(r["status"] == "queued" for r in project_renders):
+                    overall_status = "queued"
+                
+                avg_progress = 100
+                if active_sum:
+                    avg_progress = int(sum(r["progress"] for r in active_sum) / len(active_sum))
+                
+                return {
+                    "status": overall_status,
+                    "progress": avg_progress,
+                    "message": "Renderizando clips..." if overall_status == "rendering" else ("En cola..." if overall_status == "queued" else "Renderizado completado"),
+                    "active_clips": project_renders,
+                    "version": version
+                }
+
+            if version in active_processes:
+                state = active_processes[version]
+                if state.user_id and state.user_id != user_id:
+                    raise HTTPException(status_code=403, detail="Unauthorized")
+                return state.to_dict()
         
         # Default to the most recent active process of THIS user ONLY
         if active_processes:
@@ -1029,179 +1112,255 @@ async def get_transcript_version(version: str, request: Request):
 # REMOVED: Global /api/transcript endpoint (security risk)
 # All transcript access now requires version + auth
 
-def do_render_queue(version_id, clip_indices, preferredLanguage='es'):
+def do_render_queue(version_id, clip_indices, preferredLanguage='es', proj_title=None):
     log_file_path = os.path.join(BASE_DIR, f"pipeline_{version_id}.log")
     
-    render_logger.info(f"START BATCH RENDER: Version {version_id}, Clips {clip_indices}, Lang {preferredLanguage}")
+    # Requirement: HIGH-PRECISION Style HEADER (MATCHING PIPELINE.LOG)
+    if not proj_title:
+        proj_title = f"{version_id}"
+        
+    try:
+        with open(RENDER_LOG, "a", encoding="utf-8") as f:
+            f.write("\n")
+            f.write("╔══════════════════════════════════════════════════════════════════════════╗\n")
+            f.write(f"║                    🎬 [START BATCH RENDER] {time.strftime('%H:%M:%S')}              ║\n")
+            f.write("╚══════════════════════════════════════════════════════════════════════════╝\n")
+            f.write(f"   🎥 PROYECTO: {proj_title}\n")
+            f.write(f"   🎞️ CLIPS   : {clip_indices}\n")
+            f.write(f"   🌐 IDIOMA  : {preferredLanguage.upper()}\n")
+            f.write("   ──────────────────────────────────────────────────────────────────────────\n\n")
+    except:
+        pass
     
     with open(log_file_path, "a", encoding="utf-8") as log_file:
         log_file.write(f"\n\n[RENDER] Starting Batch Render for version {version_id}. Indices: {clip_indices}\n")
         log_file.flush()
         
-        for idx in clip_indices:
-            render_state = get_or_create_state(f"render_{version_id}_{idx}")
-            if render_state.status == "rendering":
-                log_file.write(f"[RENDER] Skip Clip #{idx+1} - Busy\n")
-                continue
-                
-            try:
-                render_state.status = "rendering"
-                render_state.message = f"Starting Clip #{idx+1}..."
-                render_state.progress = 5
-                
-                log_file.write(f"[RENDER] --- Processing Clip #{idx+1} ---\n")
-                log_file.flush()
-                render_logger.info(f"Clip {idx+1}/{len(clip_indices)} start for version {version_id}...")
-                
-                # Use version-specific transcript from projects dir
-                proj_dir = find_project_dir(version_id)
-                if not proj_dir:
-                    msg = f"Project directory for {version_id} not found."
-                    render_state.status = "failed"
-                    render_state.error = msg
-                    log_file.write(f"[RENDER] ERROR: {msg}\n")
+        # Wait for turn in the UNIFIED queue (Semaphore 1)
+        # This fulfills Requirement #3: All processes (YT download + Render) share one queue.
+        log_file.write(f"[QUEUE] Render batch waiting for semaphore...\n")
+        with process_semaphore:
+            log_file.write(f"[QUEUE] Render batch is now ACTIVE\n")
+            log_file.flush()
+            
+            batch_start_time = time.time()
+            
+            for idx in clip_indices:
+                # BREAK loop if batch was canceled
+                if str(version_id) in render_batch_canceled:
+                    render_logger.warning(f"RENDER BATCH ABORTED for version {version_id} (User Stop)")
+                    break
+
+                clip_key = f"render_{version_id}_{idx}"
+                render_state = get_or_create_state(clip_key)
+                if render_state.status == "rendering":
+                    log_file.write(f"[RENDER] Skip Clip #{idx+1} - Busy\n")
                     continue
                     
-                t_path = os.path.join(proj_dir, "transcript.json")
-                if not os.path.exists(t_path):
-                    msg = f"Original transcript {t_path} not found."
-                    render_state.status = "failed"
-                    render_state.error = msg
-                    log_file.write(f"[RENDER] ERROR: {msg}\n")
-                    continue
-
-                with open(t_path, "r", encoding="utf-8") as f:
-                    manifest = json.load(f) # Renamed 'data' to 'manifest' for clarity
-                
-                # Prepare clip_data for Remotion
-                clip_data = {
-                    "words": [],
-                    "words_es": [],
-                    "video_url": None,
-                    "audio_url": None,
-                    "edit_events": {},
-                    "duration": 30,
-                    "layout": "single",
-                    "center": 0.5,
-                    "center_top": 0.5,
-                    "center_bottom": 0.5,
-                    "framing_segments": [],
-                    "preferredLanguage": preferredLanguage
-                }
-
-                # If clip_index is provided, override root fields for Remotion parity
-                if "clips" in manifest and idx < len(manifest["clips"]):
-                    clip = manifest["clips"][idx]
-                    clip_data.update({
-                        "words": clip.get("words", []),
-                        "words_es": clip.get("words_es", []),
-                        "video_url": clip.get("video_url"),
-                        "audio_url": clip.get("audio_url"),
-                        "edit_events": clip.get("edit_events", {}),
-                        "duration": clip.get("duration", 30),
-                        "layout": clip.get("layout", "single"),
-                        "center": clip.get("center", 0.5),
-                        "center_top": clip.get("center_top", 0.5),
-                        "center_bottom": clip.get("center_bottom", 0.5),
-                        "framing_segments": clip.get("framing_segments", []),
-                    })
-                    log_file.write(f"[RENDER] Clip fields updated from index {idx}\n")
-                
-                # Enrich clip_data with real branding handle and niche if account_id is present
-                account_id = manifest.get("account_id")
-                if account_id:
-                    acc = get_account_by_id(account_id)
-                    if acc:
-                        clip_data["instagram_handle"] = acc.get("name")
-                        clip_data["niche_name"] = acc.get("niche")
+                try:
+                    clip_start_time = time.time()
+                    render_state.status = "rendering"
+                    render_state.message = f"Starting Clip #{idx+1}..."
+                    render_state.progress = 5
                     
-                    '''
-                    # ... (Supabase code commented out)
-                    '''
-
-                # 1. Save modified Transcript to Remotion src
-                with open(os.path.join(REMOTION_DIR, "src", "transcript_data.json"), "w", encoding="utf-8") as f:
-                    json.dump(clip_data, f, ensure_ascii=False, indent=2)
-                
-                v_name = clip_data.get("video_url")
-                a_name = clip_data.get("audio_url")
-
-                v_path = os.path.join(proj_dir, "clips", v_name) if v_name and v_name.startswith("video") else os.path.join(proj_dir, v_name)
-                if not v_name or not os.path.exists(v_path):
-                    msg = f"Video file {v_name} not found."
-                    render_state.status = "failed"
-                    render_state.error = msg
-                    log_file.write(f"[RENDER] ERROR: {msg}\n")
-                    continue
-
-                # 2. Media to Remotion public
-                remotion_public = os.path.join(REMOTION_DIR, "public")
-                shutil.copy(v_path, os.path.join(remotion_public, v_name))
-                a_path = os.path.join(proj_dir, "clips", a_name) if a_name and a_name.startswith("audio") else os.path.join(proj_dir, a_name)
-                if a_name and os.path.exists(a_path):
-                    shutil.copy(a_path, os.path.join(remotion_public, a_name))
-                
-                # IMPORTANT: Delete previous render output to avoid stale copies if build fails
-                final_out = os.path.join(REMOTION_DIR, "out.mp4")
-                if os.path.exists(final_out):
-                    try: os.remove(final_out)
-                    except: pass
-
-                render_state.message = f"Building Clip #{idx+1}..."
-                render_state.progress = 20
-                log_file.write(f"[RENDER] Running Remotion build for Clip #{idx+1}...\n")
-                log_file.flush()
-                
-                process = subprocess.Popen(
-                    ["npm", "run", "build"],
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                    cwd=REMOTION_DIR, shell=True
-                )
-                
-                has_started_rendering = False
-                for line in process.stdout:
-                    if "Rendering" in line and not has_started_rendering:
-                        render_state.progress = 50
-                        render_state.message = f"Rendering Clip #{idx+1}..."
-                        log_file.write(f"[RENDER] Final rendering phase started for Clip #{idx+1}...\n")
-                        log_file.flush()
-                        has_started_rendering = True
+                    header = "="*50 + f"\n[RENDER] PROYECTO: {proj_title} | CLIP: #{idx+1}\n" + "="*50 + "\n"
+                    log_file.write(header)
+                    log_file.flush()
+                    render_logger.info(f"Clip {idx+1}/{len(clip_indices)} start for project '{proj_title}'...")
+                        
+                    # Use version-specific transcript from projects dir
+                    proj_dir = find_project_dir(version_id)
+                    if not proj_dir:
+                        msg = f"Project directory for {version_id} not found."
+                        render_state.status = "failed"
+                        render_state.error = msg
+                        log_file.write(f"[RENDER] ERROR: {msg}\n")
+                        continue
+                        
+                    t_path = os.path.join(proj_dir, "transcript.json")
+                    if not os.path.exists(t_path):
+                        msg = f"Original transcript {t_path} not found."
+                        render_state.status = "failed"
+                        render_state.error = msg
+                        log_file.write(f"[RENDER] ERROR: {msg}\n")
+                        continue
+    
+                    with open(t_path, "r", encoding="utf-8") as f:
+                        manifest = json.load(f) # Renamed 'data' to 'manifest' for clarity
                     
-                    # Still print to console for server visibility, but NOT to log_file
-                    print(f"[Remotion-Internal] {line.strip()}")
-                
-                process.wait()
-                if process.returncode == 0:
-                    render_state.status = "completed"
-                    render_state.message = f"Clip #{idx+1} Ready!"
-                    render_state.progress = 100
-                    log_file.write(f"[RENDER] SUCCESS: Clip #{idx+1} completed.\n")
-                    render_logger.info(f"Clip {idx+1} SUCCESS for version {version_id}")
+                    # Prepare clip_data for Remotion
+                    clip_data = {
+                        "words": [],
+                        "words_es": [],
+                        "video_url": None,
+                        "audio_url": None,
+                        "edit_events": {},
+                        "duration": 30,
+                        "layout": "single",
+                        "center": 0.5,
+                        "center_top": 0.5,
+                        "center_bottom": 0.5,
+                        "framing_segments": [],
+                        "preferredLanguage": preferredLanguage
+                    }
+    
+                    # If clip_index is provided, override root fields for Remotion parity
+                    if "clips" in manifest and idx < len(manifest["clips"]):
+                        clip = manifest["clips"][idx]
+                        clip_data.update({
+                            "words": clip.get("words", []),
+                            "words_es": clip.get("words_es", []),
+                            "video_url": clip.get("video_url"),
+                            "audio_url": clip.get("audio_url"),
+                            "edit_events": clip.get("edit_events", {}),
+                            "duration": clip.get("duration", 30),
+                            "layout": clip.get("layout", "single"),
+                            "center": clip.get("center", 0.5),
+                            "center_top": clip.get("center_top", 0.5),
+                            "center_bottom": clip.get("center_bottom", 0.5),
+                            "framing_segments": clip.get("framing_segments", []),
+                        })
+                        log_file.write(f"[RENDER] Clip fields updated from index {idx}\n")
                     
+                    # Enrich clip_data with real branding handle and niche if account_id is present
+                    account_id = manifest.get("account_id")
+                    if account_id:
+                        acc = get_account_by_id(account_id)
+                        if acc:
+                            clip_data["instagram_handle"] = acc.get("name")
+                            clip_data["niche_name"] = acc.get("niche")
+                        
+                        '''
+                        # ... (Supabase code commented out)
+                        '''
+    
+                    # 1. Save modified Transcript to Remotion src
+                    with open(os.path.join(REMOTION_DIR, "src", "transcript_data.json"), "w", encoding="utf-8") as f:
+                        json.dump(clip_data, f, ensure_ascii=False, indent=2)
+                    
+                    v_name = clip_data.get("video_url")
+                    a_name = clip_data.get("audio_url")
+    
+                    v_path = os.path.join(proj_dir, "clips", v_name) if v_name and v_name.startswith("video") else os.path.join(proj_dir, v_name)
+                    if not v_name or not os.path.exists(v_path):
+                        msg = f"Video file {v_name} not found."
+                        render_state.status = "failed"
+                        render_state.error = msg
+                        log_file.write(f"[RENDER] ERROR: {msg}\n")
+                        continue
+    
+                    # 2. Media to Remotion public
+                    remotion_public = os.path.join(REMOTION_DIR, "public")
+                    shutil.copy(v_path, os.path.join(remotion_public, v_name))
+                    a_path = os.path.join(proj_dir, "clips", a_name) if a_name and a_name.startswith("audio") else os.path.join(proj_dir, a_name)
+                    if a_name and os.path.exists(a_path):
+                        shutil.copy(a_path, os.path.join(remotion_public, a_name))
+                    
+                    # IMPORTANT: Delete previous render output to avoid stale copies if build fails
                     final_out = os.path.join(REMOTION_DIR, "out.mp4")
                     if os.path.exists(final_out):
-                        dest_file = f"out_{version_id}_clip_{idx+1}.mp4"
-                        # Save to public for serving
-                        shutil.copy(final_out, os.path.join(PUBLIC_DIR, dest_file))
-                        # Also save to project renders dir
-                        _r_proj = find_project_dir(version_id)
-                        renders_dir = os.path.join(_r_proj, "renders") if _r_proj else os.path.join(PROJECTS_DIR, str(version_id), "renders")
-                        os.makedirs(renders_dir, exist_ok=True)
-                        shutil.copy(final_out, os.path.join(renders_dir, f"out_clip_{idx+1}.mp4"))
-                        log_file.write(f"[RENDER] Saved to {dest_file} + projects/{version_id}/renders/\n")
-                else:
-                    render_state.status = "failed"
-                    render_state.message = f"Failed Clip #{idx+1}"
-                    log_file.write(f"[RENDER] ERROR: Remotion build failed (Exit Code {process.returncode})\n")
-                    render_logger.error(f"Clip {idx+1} FAILED for version {version_id}")
+                        try: os.remove(final_out)
+                        except: pass
+    
+                    render_state.message = f"Building Clip #{idx+1}..."
+                    render_state.progress = 20
+                    log_file.write(f"[RENDER] Running Remotion build for Clip #{idx+1}...\n")
+                    log_file.flush()
                     
-            except Exception as e:
-                render_state.status = "failed"
-                render_state.message = f"Error: {str(e)}"
-                log_file.write(f"[RENDER] EXCEPTION: {str(e)}\n")
-                render_logger.exception(f"Clip {idx+1} EXCEPTION for version {version_id}: {str(e)}")
-            log_file.flush()
-    render_logger.info(f"END BATCH RENDER: Version {version_id}")
+                    process = subprocess.Popen(
+                        ["npm", "run", "build"],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                        cwd=REMOTION_DIR, shell=True
+                    )
+                    
+                    # Track for cancellation
+                    with processes_lock:
+                        active_render_procs[clip_key] = process
+                    
+                    import re
+                    has_started_rendering = False
+                    for line in process.stdout:
+                        if "Rendering" in line and not has_started_rendering:
+                            render_state.progress = 50
+                            render_state.message = f"Rendering Clip #{idx+1}..."
+                            log_file.write(f"[RENDER] Final rendering phase started for Clip #{idx+1}...\n")
+                            log_file.flush()
+                            has_started_rendering = True
+                            
+                        if has_started_rendering:
+                            # Try to extract exact percentage from Remotion output e.g. "12/100 frames (12%)"
+                            m = re.search(r"\((\d+)%\)", line)
+                            if m:
+                                p = int(m.group(1))
+                                render_state.progress = 50 + int(p / 2) # map 2nd half of overall progress to actual encoding
+                        
+                        # Still print to console for server visibility, but NOT to log_file
+                        print(f"[Remotion-Internal] {line.strip()}")
+                    
+                    process.wait()
+                    
+                    # Remove from tracking
+                    with processes_lock:
+                        if clip_key in active_render_procs:
+                            del active_render_procs[clip_key]
+
+                    if process.returncode == 0:
+                        clip_end_time = time.time()
+                        clip_duration = clip_end_time - clip_start_time
+                        duration_str = format_duration(clip_duration)
+                        
+                        render_state.status = "completed"
+                        render_state.message = f"Clip #{idx+1} Ready!"
+                        render_state.progress = 100
+                        log_file.write(f"[RENDER] SUCCESS: Clip #{idx+1} completed in {duration_str}.\n\n")
+                        render_logger.info(f"Clip {idx+1} SUCCESS for version {version_id} in {duration_str}")
+                        
+                        final_out = os.path.join(REMOTION_DIR, "out.mp4")
+                        if os.path.exists(final_out):
+                            dest_file = f"out_{version_id}_clip_{idx+1}.mp4"
+                            # Save to public for serving
+                            shutil.copy(final_out, os.path.join(PUBLIC_DIR, dest_file))
+                            # Also save to project renders dir
+                            _r_proj = find_project_dir(version_id)
+                            renders_dir = os.path.join(_r_proj, "renders") if _r_proj else os.path.join(PROJECTS_DIR, str(version_id), "renders")
+                            os.makedirs(renders_dir, exist_ok=True)
+                            shutil.copy(final_out, os.path.join(renders_dir, f"out_clip_{idx+1}.mp4"))
+                            log_file.write(f"[RENDER] Saved to {dest_file} + projects/{version_id}/renders/\n")
+                    else:
+                        render_state.status = "failed"
+                        render_state.message = f"Failed Clip #{idx+1}"
+                        log_file.write(f"[RENDER] ERROR: Remotion build failed (Exit Code {process.returncode})\n")
+                        render_logger.error(f"Clip {idx+1} FAILED for version {version_id}")
+                        
+                except Exception as e:
+                    render_state.status = "failed"
+                    render_state.message = f"Error: {str(e)}"
+                    log_file.write(f"[RENDER] EXCEPTION: {str(e)}\n")
+                    render_logger.exception(f"Clip {idx+1} EXCEPTION for version {version_id}: {str(e)}")
+                log_file.flush()
+        
+        batch_total_time = time.time() - batch_start_time
+        total_str = format_duration(batch_total_time)
+        
+        # High-visibility Footer in RENDER.LOG (PIPELINE Style)
+        try:
+            with open(RENDER_LOG, "a", encoding="utf-8") as f:
+                f.write("\n")
+                f.write(f"   🏁 [FINISH BATCH RENDER] {time.strftime('%H:%M:%S')}\n")
+                f.write(f"   ⏱️ TIEMPO TOTAL: {total_str}\n")
+                f.write(f"   🎥 PROYECTO    : {proj_title}\n")
+                f.write("   ──────────────────────────────────────────────────────────────────────────\n\n")
+        except: pass
+
+        log_file.write(f"\n" + "-"*50 + f"\n[BATCH END] Renderizado de tanda completado en {total_str}\n" + "-"*50 + "\n")
+        log_file.flush()
+
+    # Clean up cancellation flag if set
+    with processes_lock:
+        if str(version_id) in render_batch_canceled:
+            render_batch_canceled.remove(str(version_id))
+
+    render_logger.info(f"END BATCH RENDER: Version {version_id} in {total_str}")
 
 @app.post("/api/render")
 async def render_clips(render_req: RenderRequest, request: Request, background_tasks: BackgroundTasks):
@@ -1211,14 +1370,88 @@ async def render_clips(render_req: RenderRequest, request: Request, background_t
     # Ownership Check with validated token
     _render_proj = find_project_dir(render_req.version)
     t_path = os.path.join(_render_proj, "transcript.json") if _render_proj else os.path.join(BASE_DIR, f"transcript_{render_req.version}.json")
+    p_title = None
     if os.path.exists(t_path):
         with open(t_path, "r", encoding="utf-8") as f:
             data = json.load(f)
             if data.get("user_id") and data.get("user_id") != user_id:
                 raise HTTPException(status_code=403, detail="Unauthorized to render this project")
+            p_title = data.get("title")
 
-    background_tasks.add_task(do_render_queue, render_req.version, render_req.indices, render_req.preferredLanguage)
+    # Initialize queued state for visual feedback
+    for idx in render_req.indices:
+        state = get_or_create_state(f"render_{render_req.version}_{idx}", None, user_id=user_id)
+        if state.status not in ["rendering"]:
+            state.status = "queued"
+            state.progress = 0
+            state.message = "Esperando turno..."
+            state.timestamp = time.time()  # Important for global sorting priority
+            
+    background_tasks.add_task(do_render_queue, render_req.version, render_req.indices, render_req.preferredLanguage, p_title)
     return {"message": "Render started for selected clips"}
+
+@app.post("/api/cancel-render")
+async def cancel_render(request: Request):
+    """Emergency kill for all active render processes."""
+    user_id = await get_current_user(request)
+    render_logger.info(f"CANCEL RENDER REQUESTED by user: {user_id}")
+    
+    killed_count = 0
+    canceled_names = set()
+    with processes_lock:
+        # We kill EVERY active render process currently tracked
+        for key, proc in list(active_render_procs.items()):
+            try:
+                # Add version to cancellation set to stop do_render_queue loop
+                v_id = None
+                try:
+                    v_id = key.split("_")[1]
+                    render_batch_canceled.add(str(v_id))
+                except: pass
+
+                # Determine PROJECT NAME for logging
+                try:
+                    p_name = f"{v_id}"
+                    _pd = find_project_dir(v_id)
+                    _tp = os.path.join(_pd, "transcript.json") if _pd else os.path.join(BASE_DIR, f"transcript_{v_id}.json")
+                    if os.path.exists(_tp):
+                        with open(_tp, "r", encoding="utf-8") as tf:
+                            p_name = json.load(tf).get("title") or v_id
+                    canceled_names.add(p_name)
+                except: pass
+
+                # On Windows, taskkill is often safer for shell=True processes
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], check=False)
+                else:
+                    proc.terminate()
+                
+                # Mark state as failed/cancelled
+                if key in active_processes:
+                    state = active_processes[key]
+                    state.status = "failed"
+                    state.message = "Render Cancelado por el Usuario"
+                    state.error = "Proceso terminado manualmente."
+                
+                del active_render_procs[key]
+                killed_count += 1
+            except Exception as e:
+                render_logger.error(f"Error killing process {key}: {e}")
+
+    # Log to render.log (Fancy Cancel Banner)
+    projs_str = ", ".join(canceled_names) if canceled_names else "Desconocido"
+    try:
+        with open(RENDER_LOG, "a", encoding="utf-8") as f:
+            f.write("\n")
+            f.write("   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
+            f.write(f"   🛑 [CANCEL BATCH RENDER] {time.strftime('%H:%M:%S')}\n")
+            f.write(f"   🎥 PROYECTO: {projs_str}\n")
+            f.write(f"   ℹ️ DETALLE : {killed_count} procesos terminados por el usuario.\n")
+            f.write("   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n\n")
+    except:
+        render_logger.warning(f"Failed to write cancel log via file - using logger as fallback.")
+
+    return {"status": "success", "message": f"Se detuvieron {killed_count} procesos de renderizado."}
 
 if __name__ == "__main__":
     import uvicorn

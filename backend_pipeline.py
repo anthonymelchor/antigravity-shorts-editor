@@ -94,7 +94,8 @@ def transcribe_audio(video_path, model_size="base"):
         return {
             "text": full_text.strip(),
             "words": words,
-            "segments": segments_data
+            "segments": segments_data,
+            "language": info.language
         }
     except Exception as e:
         logger.error(f"Failed to transcribe audio: {str(e)}")
@@ -129,11 +130,11 @@ def search_pexels_videos(query):
         
     return None
 
-def translate_full_transcript_global(segments_data):
-    """Translates the ENTIRE transcript using 'Anchor Segments' and overlapping context."""
+def translate_full_transcript_global(segments_data, source_lang="en"):
+    """Translates or refines the ENTIRE transcript using 'Anchor Segments' and overlapping context."""
     if not segments_data: return []
     
-    logger.info(f"Performing GLOBAL translation for {len(segments_data)} segments...")
+    logger.info(f"Performing GLOBAL transcript refinement/translation (Source: {source_lang})...")
     api_key = os.environ.get("GEMINI_API_KEY")
     client = genai.Client(api_key=api_key)
     
@@ -154,19 +155,25 @@ def translate_full_transcript_global(segments_data):
         batch_map = {str(idx): text for idx, text in enumerate(batch_texts)}
         
         prompt = f"""
-        Act as a professional translator. Translate the following segments into Spanish.
+        Act as a professional transcription refiner and translator. 
+        Your goal is to provide a LITERAL version in Spanish of the provided segments.
         
-        CONTEXT FROM PREVIOUS SEGMENTS (Do NOT translate these, just use for continuity):
+        STRICT RULES:
+        1. NO PARA-PHRASING. The text must match the phonetic audio as closely as possible.
+        2. DO NOT "improve" or "clean up" the speaker's style. If the speaker is repetitive, keep it.
+        3. DO NOT remove filler words.
+        4. TECHNICAL TERMS: Ensure terms like 'ChatGPT', 'AI', 'SaaS', 'B-Roll', etc., are spelled correctly.
+        5. LANGUAGE: If the input is English, translate it to Spanish. If the input is already Spanish, FIX ONLY spelling and punctuation.
+        6. FIDELITY: Maintain the exact same amount of information. Your task is literal fidelity.
+        
+        CONTEXT FROM PREVIOUS SEGMENTS (Do NOT process these):
         {json.dumps(prev_context)}
         
-        SEGMENTS TO TRANSLATE (Index mapping):
+        SEGMENTS TO PROCESS (Index mapping):
         {json.dumps(batch_map)}
         
-        INSTRUCTIONS:
-        1. Maintain a professional, clean, and engaging tone.
-        2. Ensure terminological consistency with the context provided.
-        3. IMPORTANT: Return a raw JSON object where the keys are the INDEXES from the input and the values are the TRANSLATED strings.
-        4. You must translate ALL keys.
+        OUTPUT FORMAT:
+        Return a raw JSON object where the keys are the INDEXES from the input and the values are the PROCESSED strings.
         """
         
         translated_map = {}
@@ -311,6 +318,7 @@ def analyze_with_gemini(transcript, user_id=None):
     if video_duration_min <= 20:
         # Vídeo corto — enviar todo
         sampled_words = all_words
+        length_instruction = "Extrae todos los buenos clips que encuentres, al menos 3 a 5 si tienen calidad."
     else:
         # Vídeo largo — muestra distribuida uniformemente
         max_words = 4000 if video_duration_min > 40 else 3000
@@ -325,6 +333,11 @@ def analyze_with_gemini(transcript, user_id=None):
             f"Vídeo largo ({video_duration_min:.1f} min) — words muestreados: "
             f"{len(sampled_words)}/{total_words} (distribuidos uniformemente)"
         )
+        
+        if video_duration_min > 40:
+            length_instruction = "¡ALERTA CRÍTICA! Este es un VÍDEO MUY LARGO (más de 40 minutos) lleno de valor. Tienes la OBLIGACIÓN ABSOLUTA de extraer TODOS los momentos virales, que suelen ser ENTRE 10 Y 25 CLIPS INDIVIDUALES. ¡NO seas perezoso! Revisa toda la hora."
+        else:
+            length_instruction = "¡ATENCIÓN! Este vídeo dura más de 20 minutos. Deberías encontrar un MÍNIMO de 8 a 15 clips de alta calidad. Extrae todos y cada uno de ellos."
 
     transcript_words = json.dumps(sampled_words, ensure_ascii=False)
 
@@ -337,6 +350,8 @@ PASO 2 → rellena el array "clips" (tu selección final, usando el contexto del
 
 Este orden es obligatorio. Primero entiendes el vídeo, luego extraes los clips.
 
+{length_instruction}
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PASO 1 — ANÁLISIS DE CONTEXTO
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -348,7 +363,7 @@ Lee la transcripción completa y extrae:
 - angulo_unico: qué hace diferente a este creador vs. el resto del contenido del mismo tema
 - datos_concretos: cualquier cifra, edad, cantidad, precio, porcentaje mencionado
 - frases_gancho: las 5-8 frases literales más poderosas, las que podrían detener el scroll
-- momentos_intensos: mínimo 3, máximo 10 picos emocionales, revelaciones,
+- momentos_intensos: mínimo {6 if video_duration_min > 40 else 3}, máximo {25 if video_duration_min > 40 else 10} picos emocionales, revelaciones,
   contradicciones, historias personales o datos impactantes con sus timestamps
 - is_podcast: true si detectas un diálogo/entrevista entre 2 o más personas, 
   false si es un monólogo, un solo narrador hablando a cámara o un tutorial.
@@ -360,6 +375,7 @@ Lee la transcripción completa y extrae:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PASO 2 — EXTRACCIÓN DE CLIPS VIRALES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 Usando el análisis del Paso 1 como guía, selecciona los fragmentos que puedan
 convertirse en shorts que la gente no pueda dejar de ver, que comenten,
@@ -921,6 +937,7 @@ def process_video_ffmpeg(input_path, output_path, start_time, end_time, audio_pa
             "-c:v", "libx264",
             "-crf", "17", # HIGH QUALITY (Visually Lossless)
             "-preset", "ultrafast",
+            "-g", "1", # CRITICAL FOR FRAME-ACCURATE SCRUBBING ON THE WEB
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
             "-b:a", "192k",
@@ -1069,10 +1086,15 @@ if __name__ == "__main__":
         transcript = transcribe_audio(video_file)
         logger.info(f"   ✅ [PHASE 2] Transcription completed in {time.time() - t_start:.2f}s")
             
-        # 2.5 GLOBAL TRANSLATION (Scaling improvement)
+        # 2.5 GLOBAL REFINEMENT / TRANSLATION
         t_start = time.time()
-        full_translated_words = translate_full_transcript_global(transcript['segments'])
-        logger.info(f"   ✅ [PHASE 2.5] Global Translation completed in {time.time() - t_start:.2f}s")
+        # Even for Spanish, we run it through Gemini to fix Whisper spelling mistakes (like 'ChatGPT')
+        # using a STRICT literal prompt to avoid paraphrasing.
+        full_translated_words = translate_full_transcript_global(
+            transcript['segments'], 
+            source_lang=transcript.get("language", "en")
+        )
+        logger.info(f"   ✅ [PHASE 2.5] Transcript Refinement completed in {time.time() - t_start:.2f}s")
 
         # 3. Analyze Transcript with Gemini (New v3.0 logic with context and account detection)
         t_start = time.time()
@@ -1206,9 +1228,14 @@ if __name__ == "__main__":
         # SECURITY: Removed global transcript_data.json write.
         # Each user's data stays isolated in transcript_{version}.json only.
 
+        total_seconds = time.time() - global_start
+        mins = int(total_seconds // 60)
+        secs = int(total_seconds % 60)
+        time_str = f"{mins} min {secs} seg" if mins > 0 else f"{secs} seg"
+
         logger.info("")
         logger.info("   🏁 PIPELINE FINISHED SUCCESSFULY")
-        logger.info(f"   ⏱️ TOTAL TIME: {time.time() - global_start:.2f}s")
+        logger.info(f"   ⏱️ TOTAL TIME: {time_str}")
         logger.info("   ──────────────────────────────────────────────────────────────────")
         logger.info("")
 
