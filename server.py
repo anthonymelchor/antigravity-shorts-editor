@@ -410,6 +410,7 @@ class ProcessRequest(BaseModel):
     url: str
     user_id: Optional[str] = None
     niche: Optional[str] = None
+    enable_bg_music: Optional[bool] = True
 
 class ProcessingState:
     def __init__(self, url="", title="", user_id=None, niche=None):
@@ -480,7 +481,7 @@ class PublishedToggle(BaseModel):
     clip_index: int
     published: bool
 
-def run_pipeline(url: str, version: int, niche: Optional[str] = None):
+def run_pipeline(url: str, version: int, niche: Optional[str] = None, enable_bg_music: bool = True):
     # Use localized state for this process
     state = get_or_create_state(version, url, niche=niche)
     state.version = str(version)
@@ -522,6 +523,7 @@ def run_pipeline(url: str, version: int, niche: Optional[str] = None):
                     cmd.extend(["--title", state.title])
                 if niche:
                     cmd.extend(["--niche", niche])
+                cmd.extend(["--enable_bg_music", "true" if enable_bg_music else "false"])
                 
                 with open(log_filename, "w", encoding="utf-8") as log_file:
                     process = subprocess.Popen(
@@ -771,7 +773,7 @@ async def process_video(process_req: ProcessRequest, request: Request, backgroun
     state.version = version
     state.user_id = user_id
     state.timestamp = version
-    background_tasks.add_task(run_pipeline, process_req.url, version, process_req.niche)
+    background_tasks.add_task(run_pipeline, process_req.url, version, process_req.niche, process_req.enable_bg_music if process_req.enable_bg_music is not None else True)
     return {"message": "Processing started", "version": version}
 
 @app.post("/api/reset")

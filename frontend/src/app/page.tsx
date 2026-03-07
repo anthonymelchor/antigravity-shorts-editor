@@ -29,7 +29,8 @@ import {
     X,
     Globe,
     Clock,
-    Loader2
+    Loader2,
+    Music2
 } from 'lucide-react';
 import Link from 'next/link';
 import { createClientComponentClient } from '@supabase/auth-helpers-nextjs';
@@ -116,6 +117,8 @@ export default function Home() {
     const [isLaunching, setIsLaunching] = useState(false);
     const [currentFrame, setCurrentFrame] = useState(0);
     const [timelineZoom, setTimelineZoom] = useState(1);
+    const [showAnalyzeModal, setShowAnalyzeModal] = useState(false);
+    const [enableBgMusic, setEnableBgMusic] = useState(true);
     const processingRef = useRef<string | null>(null);
     const versionRef = useRef<string | null>(null);
     const playerRef = useRef<PlayerRef>(null);
@@ -371,6 +374,7 @@ export default function Home() {
         }
 
         try {
+            setShowAnalyzeModal(false);
             setAlert(null);
             setIsLaunching(true);
             setActiveUrl(url.trim());
@@ -383,7 +387,8 @@ export default function Home() {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     url: url.trim(),
-                    niche: selectedNiche || undefined
+                    niche: selectedNiche || undefined,
+                    enable_bg_music: enableBgMusic
                 })
             });
             const data = await res.json();
@@ -1118,7 +1123,7 @@ export default function Home() {
                         </div>
 
                         <button
-                            onClick={handleProcess}
+                            onClick={() => { if (url.trim()) setShowAnalyzeModal(true); }}
                             disabled={isLaunching || !url}
                             className={`bg-white text-black px-12 py-5 rounded-[1.5rem] font-black uppercase text-[12px] tracking-tighter transition-all shadow-[0_10px_40px_rgba(255,255,255,0.1)] active:scale-95 flex items-center gap-2
                 ${isLaunching ? 'opacity-50 cursor-wait bg-neutral-400' : 'hover:bg-neutral-200 cursor-pointer disabled:opacity-10'}`}
@@ -1578,6 +1583,78 @@ export default function Home() {
                                     className="flex-1 bg-red-600 text-white font-black py-4 rounded-2xl uppercase text-[10px] tracking-widest transition-all shadow-2xl"
                                 >
                                     Detener Todo
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )
+            }
+
+            {/* ANALYZE CONFIRMATION MODAL */}
+            {
+                showAnalyzeModal && (
+                    <div className="fixed inset-0 z-[300] flex items-center justify-center p-8 backdrop-blur-3xl bg-black/80 animate-in fade-in duration-300">
+                        <div className="bg-[#050505] border border-white/5 rounded-[3rem] p-12 max-w-xl w-full shadow-[0_40px_100px_rgba(0,0,0,1)] border-t-white/10">
+
+                            {/* Icon + Title */}
+                            <div className="flex items-center gap-5 mb-8">
+                                <div className="w-16 h-16 bg-white/5 rounded-[1.2rem] flex items-center justify-center shrink-0 border border-white/5">
+                                    <Youtube className="w-8 h-8 text-white" />
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-black text-neutral-600 uppercase tracking-widest mb-1">Nuevo Proyecto</p>
+                                    <h2 className="text-2xl font-black tracking-tighter text-white uppercase italic">Configurar Análisis</h2>
+                                </div>
+                            </div>
+
+                            {/* YouTube URL preview */}
+                            <div className="bg-white/[0.03] border border-white/5 rounded-2xl p-4 mb-8 flex items-center gap-3">
+                                <LinkIcon className="w-4 h-4 text-neutral-600 shrink-0" />
+                                <p className="text-[11px] text-neutral-400 font-mono truncate">{url}</p>
+                            </div>
+
+                            {/* Divider */}
+                            <div className="border-t border-white/5 mb-8" />
+
+                            {/* Music Toggle */}
+                            <div className="flex items-center justify-between mb-10">
+                                <div className="flex items-center gap-4">
+                                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center border transition-all ${enableBgMusic ? 'bg-white/10 border-white/20' : 'bg-white/[0.03] border-white/5'
+                                        }`}>
+                                        <Music2 className={`w-5 h-5 transition-all ${enableBgMusic ? 'text-white' : 'text-neutral-600'}`} />
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-black text-white">Música de Fondo</p>
+                                        <p className="text-[10px] text-neutral-600 font-medium uppercase tracking-widest mt-0.5">
+                                            {enableBgMusic ? 'Se mezclará automáticamente según el nicho' : 'El audio original se mantendrá limpio'}
+                                        </p>
+                                    </div>
+                                </div>
+                                {/* Toggle switch */}
+                                <button
+                                    onClick={() => setEnableBgMusic(prev => !prev)}
+                                    className={`relative w-14 h-7 rounded-full transition-all duration-300 shrink-0 cursor-pointer border ${enableBgMusic ? 'bg-white border-white' : 'bg-white/10 border-white/10'
+                                        }`}
+                                >
+                                    <div className={`absolute top-1 w-5 h-5 rounded-full transition-all duration-300 shadow-md ${enableBgMusic ? 'left-8 bg-black' : 'left-1 bg-neutral-400'
+                                        }`} />
+                                </button>
+                            </div>
+
+                            {/* Action Buttons */}
+                            <div className="flex gap-4">
+                                <button
+                                    onClick={() => setShowAnalyzeModal(false)}
+                                    className="flex-1 px-8 py-4 bg-white/5 hover:bg-white/10 text-white font-black rounded-2xl uppercase text-[10px] tracking-widest transition-all cursor-pointer"
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    onClick={handleProcess}
+                                    className="flex-1 bg-white text-black font-black py-4 rounded-2xl uppercase text-[10px] tracking-widest transition-all shadow-2xl hover:bg-neutral-200 active:scale-95 cursor-pointer flex items-center justify-center gap-2"
+                                >
+                                    <Zap className="w-4 h-4" />
+                                    Iniciar Análisis
                                 </button>
                             </div>
                         </div>

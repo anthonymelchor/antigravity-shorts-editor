@@ -10,6 +10,14 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     ffmpeg \
+    pkg-config \
+    libavdevice-dev \
+    libavfilter-dev \
+    libavformat-dev \
+    libavcodec-dev \
+    libswresample-dev \
+    libswscale-dev \
+    libavutil-dev \
     build-essential \
     libgl1 \
     libglib2.0-0 \

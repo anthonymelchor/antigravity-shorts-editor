@@ -16,6 +16,7 @@ from google.genai import types
 import sys
 import traceback
 from dotenv import load_dotenv
+import audio_processor
 
 # Cargar variables de entorno desde .env
 load_dotenv()
@@ -962,6 +963,8 @@ if __name__ == "__main__":
     parser.add_argument("--whisper_model", default="base",
                         choices=["tiny", "base", "small", "medium", "large"],
                         help="Whisper model size (default: base). Use 'tiny' for speed or 'small'/'medium' for higher accuracy.")
+    parser.add_argument("--enable_bg_music", default="true",
+                        help="Whether to mix background music with ducking (true/false, default: true)")
     
     args = parser.parse_known_args()[0]
     
@@ -971,6 +974,7 @@ if __name__ == "__main__":
     title = args.title
     initial_niche = args.niche
     whisper_model_size = args.whisper_model  # 'tiny' by default
+    enable_bg_music = args.enable_bg_music.lower() != 'false'  # True unless explicitly 'false'
 
     # Define project directory structure with readable folder name
     folder_name = f"{slugify(title)}_{version}" if title else version
@@ -1079,6 +1083,19 @@ if __name__ == "__main__":
         shared_face_detector = vision.FaceDetector.create_from_options(face_options)
 
         processed_clips = []
+
+        # ── BACKGROUND MUSIC SELECTION (once per run) ──────────────────────
+        selected_music_path = None
+        if enable_bg_music:
+            MUSIC_BASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "remotion-app", "public", "music")
+            selected_music_path = audio_processor.select_music_for_niche(initial_niche or "", MUSIC_BASE_PATH)
+            if selected_music_path:
+                logger.info(f"   🎵 Background music selected: {os.path.basename(selected_music_path)} (Niche: {initial_niche})")
+            else:
+                logger.info(f"   🔇 No background music found for niche '{initial_niche}'. Proceeding without BGM.")
+        else:
+            logger.info(f"   🔇 Background music DISABLED by user. Keeping clean audio.")
+        # ───────────────────────────────────────────────────────────────────
         
         for idx, analysis in enumerate(raw_clips):
             logger.info(f"--- Processing Clip #{idx+1} (Score: {analysis.get('score')}) ---")
@@ -1092,6 +1109,28 @@ if __name__ == "__main__":
             
             # PHASE 3.5: Extract Clip first
             process_video_ffmpeg(video_file, V_OUT, start_time, end_time, A_OUT)
+
+            # PHASE 3.55: Mix Background Music with Auto-Ducking (if available)
+            if selected_music_path:
+                logger.info(f"      🎵 Mixing music '{os.path.basename(selected_music_path)}' with auto-ducking...")
+                # We pass clip_words at this stage — they will be computed right after,
+                # so we use the full_transcript words offset-adjusted for the clip window
+                _clip_words_for_duck = [
+                    {"start": max(0.0, float(w['start']) - start_time), "end": float(w['end']) - start_time}
+                    for w in full_transcript.get('words', [])
+                    if start_time <= w['start'] <= end_time
+                ]
+                success = audio_processor.mix_audio_with_ducking(
+                    voice_path=A_OUT,
+                    music_path=selected_music_path,
+                    output_path=A_OUT,
+                    words=_clip_words_for_duck,
+                    bg_volume=0.35
+                )
+                if success:
+                    logger.info(f"      ✅ Music mix with ducking applied successfully")
+                else:
+                    logger.warning(f"      ⚠️ Music mixing failed, keeping original clean audio")
 
             # PHASE 3.6: Slice Global Transcription (Fast and DRY)
             t_slice = time.time()
