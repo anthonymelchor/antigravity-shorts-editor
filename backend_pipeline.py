@@ -468,6 +468,7 @@ REGLAS DE ORO:
 1. Encuentra momentos con HOOK fuerte, HOLD de retención y REWARD al final.
 2. Extrae TODOS los momentos virales que encuentres (Entre 5 y 20 si es un video largo).
 3. Asegúrate de que los Timestamps sean precisos dentro de lo que escuchas.
+4. DURACIÓN OBLIGATORIA: Cada clip DEBE durar entre 25 y 90 segundos. No ignores esto.
 
 FORMATO DE RESPUESTA (ETIQUETAS ESTRICTAS):
 Debes responder EXCLUSIVAMENTE con texto plano usando estas etiquetas:
@@ -547,10 +548,13 @@ Responde ahora:
                     elif line.startswith('Reasoning:'): clip_obj['reasoning'] = line.replace('Reasoning:', '').strip()
                     elif line.startswith('Classification:'): clip_obj['classification'] = [line.replace('Classification:', '').strip()]
                 
-                # Solo agregar si validó las métricas clave
-                if clip_obj["score"] >= 5 and clip_obj["end"] > clip_obj["start"]:
+                # Solo agregar si validó las métricas clave y la duración mínima (25-90s)
+                duration = clip_obj["end"] - clip_obj["start"]
+                if clip_obj["score"] >= 5 and 25 <= duration <= 100: # 100s de margen para post-trim
                     result["clips"].append(clip_obj)
-
+                else:
+                    logger.warning(f"Clip '{clip_obj.get('title')}' descartado por duración: {duration:.1f}s")
+            
             return result
 
         except Exception as e:
@@ -1045,11 +1049,11 @@ if __name__ == "__main__":
         # The validate_universal_fix.py approach (using the original video directly) is correct.
         logger.info(f"   ✅ [PHASE 1.5] Skipping proxy — framing will use original video directly (480px internal downscale)")
         
-        # 2. Extract Full Audio for analysis
+        # 2. Extract Full Audio for analysis (MP3 for weight optimization)
         t_start = time.time()
-        FULL_AUDIO = os.path.join(PROJECT_DIR, "audio_analysis.wav")
-        extract_audio(video_file, FULL_AUDIO, bitrate="32k") # Low bitrate is enough for analysis
-        logger.info(f"   ✅ [PHASE 2] Audio extraction completed in {time.time() - t_start:.2f}s")
+        FULL_AUDIO = os.path.join(PROJECT_DIR, "audio_analysis_optimized.mp3")
+        extract_audio(video_file, FULL_AUDIO, format="mp3", bitrate="32k") 
+        logger.info(f"   ✅ [PHASE 2] Audio extraction (MP3) completed in {time.time() - t_start:.2f}s")
 
         # 3. Analyze Audio with Gemini (Hybrid Analysis)
         t_start = time.time()
