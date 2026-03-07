@@ -36,6 +36,7 @@ projects/
 # Exception: Allow original source transcript if you want to keep a template
 # but ignore the actual working data
 transcript_data.json
+!frontend/src/remotion/transcript_data.json
 transcript_*.json
 remotion-app/src/transcript_data.json
 
