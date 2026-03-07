@@ -42,19 +42,21 @@ def get_ducking_filter(words, duck_volume=0.1, fade_ms=200):
         return "volume=1.0"
         
     # Simplify words to active intervals (speech periods)
-    # We add a larger buffer (0.5s) to merge close words and prevent music pumping.
+    # We add a generous buffer (1.5s) to merge close words.
+    # Viral shorts rarely have >3s pauses, so this essentially creates one continuous ducking block.
     intervals = []
     for w in words:
-        start = max(0, float(w['start']) - 0.5)
-        end = float(w['end']) + 0.5
+        start = max(0, float(w['start']) - 1.5)
+        end = float(w['end']) + 1.5
         if not intervals or start > intervals[-1][1]:
             intervals.append([start, end])
         else:
             intervals[-1][1] = max(intervals[-1][1], end)
             
     # Safeguard against FFmpeg expression complexity limit (returns AVERROR(EINVAL))
-    if len(intervals) > 40:
-        logger.warning(f"Audio has {len(intervals)} intervals. Condensing to prevent FFmpeg crash.")
+    # FFmpeg AVExpr crashes if the syntax tree is too large. 10 intervals = safe.
+    if len(intervals) > 10:
+        logger.warning(f"Audio has {len(intervals)} intervals. Condensing to 1 global ducking block to prevent FFmpeg crash.")
         global_start = intervals[0][0]
         global_end = intervals[-1][1]
         intervals = [[global_start, global_end]]
