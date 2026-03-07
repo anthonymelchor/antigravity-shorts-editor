@@ -13,6 +13,8 @@ import shutil
 import yt_dlp
 from typing import Optional, List
 from dotenv import load_dotenv
+# from backend_pipeline_mid import translate_with_gemini_text # DELETED: Module no longer exists
+from dotenv import load_dotenv
 
 # Cargar .env
 load_dotenv()
@@ -1458,6 +1460,80 @@ async def cancel_render(request: Request):
         render_logger.warning(f"Failed to write cancel log via file - using logger as fallback.")
 
     return {"status": "success", "message": f"Se detuvieron {killed_count} procesos de renderizado."}
+
+class PreviewRemotionRequest(BaseModel):
+    version: str
+    clip_index: int
+    preferredLanguage: str = "es"
+
+remotion_studio_proc = None
+
+@app.post("/api/preview-remotion")
+async def start_remotion_preview(req: PreviewRemotionRequest, request: Request):
+    user_id = await get_current_user(request)
+    
+    _proj_dir = find_project_dir(req.version)
+    target_path = os.path.join(_proj_dir, "transcript.json") if _proj_dir else os.path.join(BASE_DIR, f"transcript_{req.version}.json")
+    
+    if not os.path.exists(target_path):
+        raise HTTPException(status_code=404, detail="Transcript not found")
+        
+    with open(target_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+        
+    if data.get("user_id") and data.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+        
+    clips = data.get("clips", [])
+    if req.clip_index >= len(clips):
+        raise HTTPException(status_code=404, detail="Clip index out of range")
+        
+    clip_data = clips[req.clip_index].copy()
+    for k, v in data.items():
+        if k != "clips" and k not in clip_data:
+            clip_data[k] = v
+            
+    clip_data["preferredLanguage"] = req.preferredLanguage
+
+    account_id = data.get("account_id")
+    if account_id:
+        acc = get_account_by_id(account_id)
+        if acc:
+            clip_data["instagram_handle"] = acc.get("name")
+            clip_data["niche_name"] = acc.get("niche")
+
+    remotion_src_tr = os.path.join(REMOTION_DIR, "src", "transcript_data.json")
+    with open(remotion_src_tr, "w", encoding="utf-8") as f:
+        json.dump(clip_data, f, ensure_ascii=False, indent=2)
+
+    v_name = clip_data.get("video_url")
+    a_name = clip_data.get("audio_url")
+    remotion_public = os.path.join(REMOTION_DIR, "public")
+    
+    if v_name:
+        v_path = os.path.join(_proj_dir, "clips", v_name) if _proj_dir and v_name.startswith("video") else (os.path.join(_proj_dir, v_name) if _proj_dir else os.path.join(BASE_DIR, v_name))
+        if os.path.exists(v_path):
+            shutil.copy(v_path, os.path.join(remotion_public, v_name))
+            
+    if a_name:
+        a_path = os.path.join(_proj_dir, "clips", a_name) if _proj_dir and a_name.startswith("audio") else (os.path.join(_proj_dir, a_name) if _proj_dir else os.path.join(BASE_DIR, a_name))
+        if os.path.exists(a_path):
+            shutil.copy(a_path, os.path.join(remotion_public, a_name))
+
+    global remotion_studio_proc
+    if not remotion_studio_proc or remotion_studio_proc.poll() is not None:
+        try:
+            cmd = "cmd /c npm start -- --port=3001" if sys.platform == "win32" else "npm start -- --port=3001"
+            remotion_studio_proc = subprocess.Popen(
+                cmd,
+                cwd=REMOTION_DIR,
+                shell=True
+            )
+            time.sleep(1.5) # Give it time to bind the port
+        except Exception as e:
+            print(f"Error starting Remotion Studio: {e}")
+
+    return {"status": "success", "url": "http://localhost:3001"}
 
 if __name__ == "__main__":
     import uvicorn

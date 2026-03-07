@@ -576,6 +576,37 @@ export default function Home() {
         }
     };
 
+    const handleOpenRemotion = async (clipIdx: number) => {
+        if (!transcript?.version) return;
+
+        try {
+            setAlert({ msg: "Sincronizando con Studio...", type: 'warning' });
+
+            const res = await authFetch(`${API_BASE}/api/preview-remotion`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    version: transcript.version,
+                    clip_index: clipIdx,
+                    preferredLanguage
+                })
+            });
+            const data = await res.json();
+
+            if (data.status === 'success') {
+                setAlert({ msg: "Abriendo Remotion Studio.", type: 'success' });
+                window.open("http://localhost:3001", "_blank");
+            } else {
+                setAlert({ msg: "Error al abrir Remotion Studio", type: 'error' });
+            }
+        } catch (err) {
+            console.error("Remotion Preview failed", err);
+            setAlert({ msg: "Hubo un error al preparar el preview.", type: 'error' });
+        }
+    };
+
+
+
     const addFramingCut = (layoutToApply: 'single' | 'split') => {
         if (!playerRef.current || selectedClipIdx === null) return;
         const clip = transcript?.clips?.[selectedClipIdx];
@@ -926,6 +957,13 @@ export default function Home() {
                                             >
                                                 <Globe className="w-3 h-3" />
                                                 {clip.published ? 'Publicado' : 'Pendiente'}
+                                            </button>
+                                            <button
+                                                onClick={(e) => { e.stopPropagation(); handleOpenRemotion(idx); }}
+                                                className="w-10 h-10 flex items-center justify-center bg-white text-black hover:bg-neutral-200 rounded-xl transition-transform hover:scale-105 shadow-xl cursor-pointer"
+                                                title="Preview exacto en Remotion Studio"
+                                            >
+                                                <ExternalLink className="w-4 h-4" />
                                             </button>
                                             <button onClick={() => { setSelectedClipIdx(idx); setView('editor'); }} className="w-10 h-10 flex items-center justify-center bg-white text-black hover:bg-neutral-200 rounded-xl transition-transform hover:scale-105 shadow-xl cursor-pointer">
                                                 <Edit2 className="w-4 h-4" />

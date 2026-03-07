@@ -13,6 +13,8 @@ from faster_whisper import WhisperModel
 from google import genai
 from google.genai import types
 from groq import Groq
+import sys
+import traceback
 from dotenv import load_dotenv
 
 # Cargar variables de entorno desde .env
@@ -152,70 +154,10 @@ def transcribe_with_groq(video_path):
         if temp_audio and os.path.exists(temp_audio):
             os.remove(temp_audio)
 
-def transcribe_with_gemini(video_path):
-    """Transcribes video using Gemini 3.1 Flash Lite."""
-    logger.info(f"Transcribing {video_path} via Gemini AI...")
-    api_key = os.environ.get("GEMINI_API_KEY")
-    client = genai.Client(api_key=api_key)
-    
-    temp_audio = extract_audio(video_path, format="mp3") # MP3 is safer for uploads
-    if not temp_audio:
-        raise ValueError("Audio extraction failed for Gemini.")
-
-    try:
-        if os.path.getsize(temp_audio) > 20 * 1024 * 1024:
-            raise ValueError("Audio file too large for Gemini Lite API.")
-
-        uploaded_file = client.files.upload(file=temp_audio)
-        while uploaded_file.state.name == "PROCESSING":
-            time.sleep(1)
-            uploaded_file = client.files.get(name=uploaded_file.name)
-            
-        prompt = """
-        Transcribe this audio. Return ONLY JSON:
-        { "language": "es", "segments": [ { "text": "...", "start": 0.0, "end": 2.0 } ] }
-        Broken segments every 3s.
-        """
-        response = client.models.generate_content(
-            model='gemini-3.1-flash-lite-preview',
-            contents=[uploaded_file, prompt],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
-        
-        result = json.loads(response.text)
-        all_words = []
-        segments_data = []
-        full_text = ""
-        
-        for seg in result.get("segments", []):
-            text = seg["text"]
-            start = seg["start"]
-            end = seg["end"]
-            full_text += text + " "
-            
-            raw_words = text.split()
-            seg_words = []
-            if raw_words:
-                dur = (end - start) / len(raw_words)
-                for i, w in enumerate(raw_words):
-                    w_obj = {"word": w, "start": start + (i * dur), "end": start + ((i+1) * dur)}
-                    all_words.append(w_obj)
-                    seg_words.append(w_obj)
-            segments_data.append({"text": text, "start": start, "end": end, "words": seg_words})
-
-        return {
-            "text": full_text.strip(),
-            "words": all_words,
-            "segments": segments_data,
-            "language": result.get("language", "es")
-        }
-    finally:
-        if temp_audio and os.path.exists(temp_audio):
-            os.remove(temp_audio)
-
 def transcribe_audio_local(video_path, model_size="base"):
     """Original Local Whisper transcription."""
     logger.info(f"Transcribing {video_path} locally (Whisper {model_size})...")
+    from faster_whisper import WhisperModel
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
     segments, info = model.transcribe(video_path, beam_size=1, word_timestamps=True, vad_filter=True)
     
@@ -234,20 +176,9 @@ def transcribe_audio_local(video_path, model_size="base"):
     return {"text": full_text.strip(), "words": words, "segments": segments_data, "language": info.language}
 
 def transcribe_audio(video_path, model_size="base"):
-    """Hybrid Master Function: Groq -> Gemini -> Local."""
-    # 1. Try Groq (Ultra Fast + Precision)
-    try:
-        return transcribe_with_groq(video_path)
-    except Exception as e:
-        logger.warning(f"Groq failed: {e}. Trying Gemini...")
-
-    # 2. Try Gemini (Cloud Fast)
-    try:
-        return transcribe_with_gemini(video_path)
-    except Exception as e:
-        logger.warning(f"Gemini failed: {e}. Falling back to LOCAL Whisper.")
-
-    # 3. Final Fallback: Local
+    """
+    Transcribes audio EXCLUSIVELY using local faster-whisper.
+    """
     return transcribe_audio_local(video_path, model_size)
 
 def search_pexels_videos(query):
@@ -321,8 +252,13 @@ def translate_full_transcript_global(segments_data, source_lang="en"):
         SEGMENTS TO PROCESS (Index mapping):
         {json.dumps(batch_map)}
         
-        OUTPUT FORMAT:
-        Return a raw JSON object where the keys are the INDEXES from the input and the values are the PROCESSED strings.
+        OUTPUT FORMAT (STRICT TEXT LABELS):
+        Return EXACTLY the following structure for each processed segment. NO JSON. NO CODE FORMATTING.
+        
+        [SEGMENT_START]
+        Index: <Index number here>
+        Text: <Spanish translation here>
+        [SEGMENT_END]
         """
         
         translated_map = {}
@@ -335,12 +271,24 @@ def translate_full_transcript_global(segments_data, source_lang="en"):
                 response = client.models.generate_content(
                     model='gemini-3.1-flash-lite-preview',
                     contents=prompt,
-                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                    config=types.GenerateContentConfig(response_mime_type="text/plain")
                 )
-                translated_map = json.loads(response.text)
+                raw_translation = response.text.strip()
+                
+                # --- PARSER BASADO EN REGEX ---
+                translated_map = {}
+                seg_blocks = re.findall(r'\[SEGMENT_START\](.*?)\[SEGMENT_END\]', raw_translation, re.DOTALL)
+                
+                for block in seg_blocks:
+                    idx_match = re.search(r'Index:\s*(\d+)', block)
+                    txt_match = re.search(r'Text:\s*(.*)', block, re.DOTALL)
+                    if idx_match and txt_match:
+                        idx_val = idx_match.group(1).strip()
+                        txt_val = txt_match.group(1).strip()
+                        translated_map[idx_val] = txt_val
                 
                 # Validate that we have most of the keys
-                if len(translated_map) >= len(batch):
+                if len(translated_map) >= len(batch) * 0.8: # Tolerance: 80% successfully translated is enough to carry on
                     break # Success
                 else:
                     logger.warning(f"Batch {i} returned fewer translations than expected ({len(translated_map)}/{len(batch)}). Retrying...")
@@ -390,54 +338,22 @@ def translate_full_transcript_global(segments_data, source_lang="en"):
                 
     return all_translated_words
 
-# Global constants for Supabase
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-def get_supabase_accounts(user_id=None):
-    """Fetch user's social media accounts from Supabase to provide context to Gemini."""
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        logger.warning("Supabase credentials missing. Cannot fetch accounts.")
-        return []
-    
-    url = f"{SUPABASE_URL}/rest/v1/accounts?select=id,name,niche"
-    if user_id:
-        url += f"&user_id=eq.{user_id}"
-    
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    try:
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            logger.warning(f"Failed to fetch accounts: {response.status_code} - {response.text}")
-    except Exception as e:
-        logger.error(f"Error fetching accounts from Supabase: {e}")
-    
-    return []
 
-def analyze_with_gemini(transcript, user_id=None):
+def analyze_with_gemini(transcript, user_id=None, video_title="Unknown"):
     """
-    MOTOR DE EXTRACCIÓN VIRAL v3.0 — Llamada única con chain-of-thought
+    MOTOR DE EXTRACCIÓN VIRAL v3.0 - Llamada unica con chain-of-thought
 
     Una sola llamada a Gemini. El JSON de salida tiene dos secciones:
-      "context" — razonamiento previo: Gemini analiza el vídeo completo
-                  antes de seleccionar nada (tema, tono, momentos intensos,
-                  frases gancho, datos concretos).
-      "clips"   — extracción final: usando el contexto como guía, selecciona
-                  los mejores fragmentos aplicando los 3 pilares virales
-                  (Hook / Hold / Reward).
+      "context" - razonamiento previo: Gemini analiza el video completo
+                  antes de seleccionar nada.
+      "clips"   - extraccion final: usando el contexto como guia.
 
     El orden en el JSON obliga al modelo a pensar antes de decidir.
     Mismo beneficio que dos llamadas, un solo API call.
 
-    Score unificado: umbral único >= 5 en prompt y en código.
-    Sin límite fijo de clips — la calidad es el único filtro.
+    Score unificado: umbral unico >= 5 en prompt y en codigo.
+    Sin limite fijo de clips - la calidad es el unico filtro.
     """
     logger.info("=== MOTOR DE EXTRACCIÓN VIRAL v3.0 ===")
     logger.info("Iniciando análisis viral (llamada única con chain-of-thought)...")
@@ -465,11 +381,11 @@ def analyze_with_gemini(transcript, user_id=None):
     video_duration_min = (all_words[-1]['end'] / 60.0) if all_words else 0
 
     if video_duration_min <= 20:
-        # Vídeo corto — enviar todo
+        # Video corto - enviar todo
         sampled_words = all_words
         length_instruction = "Extrae todos los buenos clips que encuentres, al menos 3 a 5 si tienen calidad."
     else:
-        # Vídeo largo — muestra distribuida uniformemente
+        # Video largo - muestra distribuida uniformemente
         max_words = 4000 if video_duration_min > 40 else 3000
         if total_words <= max_words:
             sampled_words = all_words
@@ -479,7 +395,7 @@ def analyze_with_gemini(transcript, user_id=None):
             sampled_words = [all_words[int(i * step)] for i in range(max_words)]
 
         logger.info(
-            f"Vídeo largo ({video_duration_min:.1f} min) — words muestreados: "
+            f"Video largo ({video_duration_min:.1f} min) - words muestreados: "
             f"{len(sampled_words)}/{total_words} (distribuidos uniformemente)"
         )
         
@@ -492,116 +408,122 @@ def analyze_with_gemini(transcript, user_id=None):
 
     prompt = f"""
 Eres el mejor editor de contenido viral del mundo. Tu respuesta tiene DOS PASOS
-que debes ejecutar EN ORDEN dentro de un único JSON.
+que debes ejecutar EN ORDEN dentro de un unico JSON.
 
-PASO 1 → rellena el objeto "context" (tu razonamiento previo sobre el vídeo)
-PASO 2 → rellena el array "clips" (tu selección final, usando el contexto del paso 1)
+PASO 1 -> rellena el objeto 'context' (tu razonamiento previo sobre el vídeo)
+PASO 2 -> rellena el array 'clips' (tu seleccion final, usando el contexto del paso 1)
 
-Este orden es obligatorio. Primero entiendes el vídeo, luego extraes los clips.
+Este orden es obligatorio. Primero entiendes el video, luego extraes los clips.
+
+TITULO DEL VIDEO (CONTEXTO): {video_title}
 
 {length_instruction}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PASO 1 — ANÁLISIS DE CONTEXTO
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+----------------------------------------
+MISION ESPECIAL: EL CLIP DEL TITULO
+----------------------------------------
+Debes encontrar el momento exacto en el video que cumple la promesa del titulo: "{video_title}". 
+- Este fragmento debe ser uno de los clips extraídos.
+- Marcalo obligatoriamente con 'Is Title Clip: true'.
+- IMPORTANTE: No limites el resto de la seleccion a este tema. Busca otros momentos virales independientes que cumplan los criterios de score >= 5.
 
-Lee la transcripción completa y extrae:
+----------------------------------------
+PASO 1 - ANALISIS DE CONTEXTO
+----------------------------------------
 
-- tema_central: una frase que resume de qué trata el vídeo
-- tono: motivacional / educativo / polémico / narrativo / mixto
-- angulo_unico: qué hace diferente a este creador vs. el resto del contenido del mismo tema
+Lee la transcripcion completa y extrae:
+
+- tema_central: una frase que resume de que trata el video
+- tono: motivacional / educativo / polemico / narrativo / mixto
+- angulo_unico: que hace diferente a este creador vs. el resto del contenido del mismo tema
 - datos_concretos: cualquier cifra, edad, cantidad, precio, porcentaje mencionado
-- frases_gancho: las 5-8 frases literales más poderosas, las que podrían detener el scroll
-- momentos_intensos: mínimo {6 if video_duration_min > 40 else 3}, máximo {25 if video_duration_min > 40 else 10} picos emocionales, revelaciones,
+- frases_gancho: las 5-8 frases literales mas poderosas, las que podrian detener el scroll
+- momentos_intensos: minimo {6 if video_duration_min > 40 else 3}, maximo {25 if video_duration_min > 40 else 10} picos emocionales, revelaciones,
   contradicciones, historias personales o datos impactantes con sus timestamps
-- is_podcast: true si detectas un diálogo/entrevista entre 2 o más personas, 
-  false si es un monólogo, un solo narrador hablando a cámara o un tutorial.
-  
-- account_id: Elije el ID de la cuenta de esta lista que mejor encaja con el nicho del video:
-  {json.dumps(get_supabase_accounts(user_id), ensure_ascii=False)}
-  Si ninguna encaja bien, pon null.
+- is_podcast: true si detectas un dialogo/entrevista entre 2 o mas personas, 
+  false si es un monologo, un solo narrador hablando a camara o un tutorial.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PASO 2 — EXTRACCIÓN DE CLIPS VIRALES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+----------------------------------------
+PASO 2 - EXTRACCION DE CLIPS VIRALES
+----------------------------------------
 
 
-Usando el análisis del Paso 1 como guía, selecciona los fragmentos que puedan
+Usando el analisis del Paso 1 como guia, selecciona los fragmentos que puedan
 convertirse en shorts que la gente no pueda dejar de ver, que comenten,
 que guarden y que compartan.
 
 LOS 3 PILARES DEL SHORT VIRAL EN 2026:
 
-PILAR 1 — HOOK (primeros 3 segundos): EL MÁS IMPORTANTE
-El algoritmo mide qué porcentaje de espectadores pasan los 3 primeros segundos.
-Sin gancho fuerte el clip no existe, no importa qué tan bueno sea el resto.
+PILAR 1 - HOOK (primeros 3 segundos): EL MAS IMPORTANTE
+El algoritmo mide que porcentaje de espectadores pasan los 3 primeros segundos.
+Sin gancho fuerte el clip no existe, no importa que tan bueno sea el resto.
 
 Tipos de gancho (en orden de efectividad):
-1. CONTRAINTUITIVO — contradice lo que el espectador cree que es verdad
-   Ej: "Las metas están sobrevaloradas" / "La motivación es una mentira"
-2. DATO_IMPACTO — cifra específica + historia personal
-   Ej: "Tenía 5.7€ en mi cuenta y a los 21 años gané mi primer millón"
-3. PREGUNTA_DOLOR — pregunta que el espectador no puede ignorar porque lo describe
-   Ej: "¿Por qué hay gente con menos talento que tú ganando más dinero?"
-4. DIAGNOSTICO — nombrar el problema exacto que el espectador tiene
-   Ej: "El problema no es que no tengas tiempo. Es que dependes de la motivación."
-5. LOOP_ABIERTO — empezar algo y no terminarlo en los primeros 3s
-   Ej: "Déjame contarte por qué casi pierdo todo lo que construí..."
+1. CONTRAINTUITIVO - contradice lo que el espectador cree que es verdad
+   Ej: 'Las metas estan sobrevaloradas' / 'La motivacion es una mentira'
+2. DATO_IMPACTO - cifra especifica + historia personal
+   Ej: 'Tenia 5.7 euros en mi cuenta y a los 21 anos gane mi primer millon'
+3. PREGUNTA_DOLOR - pregunta que el espectador no puede ignorar porque lo describe
+   Ej: 'Por que hay gente con menos talento que tu ganando mas dinero? '
+4. DIAGNOSTICO - nombrar el problema exacto que el espectador tiene
+   Ej: 'El problema no es que no tengas tiempo. Es que dependes de la motivacion.'
+5. LOOP_ABIERTO - empezar algo y no terminarlo en los primeros 3 segundos
+   Ej: 'Dejame contarte por que casi pierdo todo lo que construi...'
 
-PILAR 2 — HOLD (segundos 3-45): MANTENER LA RETENCIÓN
-La retención cae si hay más de 8 segundos sin una frase de alto valor.
+PILAR 2 - HOLD (segundos 3-45): MANTENER LA RETENCION
+La retencion cae si hay mas de 8 segundos sin una frase de alto valor.
 Un buen fragmento tiene una idea nueva o giro cada 8-10 segundos,
-usa storytelling (situación → conflicto → resolución), e incluye datos concretos.
+usa storytelling (situacion -> conflicto -> resolucion), e incluye datos concretos.
 
-PILAR 3 — REWARD (últimos 5 segundos): TRIGGER DE COMPARTIR
-Los vídeos que se comparten terminan con una verdad incómoda, un consejo
-accionable, o una frase que resume algo que el espectador sentía pero no podía articular.
+PILAR 3 - REWARD (ultimos 5 segundos): TRIGGER DE COMPARTIR
+Los videos que se comparten terminan con una verdad incomoda, un consejo
+accionable, o una frase que resume algo que el espectador sentia pero no podia articular.
 
-SISTEMA DE PUNTUACIÓN — UMBRAL ÚNICO >= 5:
+SISTEMA DE PUNTUACION - UMBRAL UNICO >= 5:
 
-HOOK (máx 9 pts):
-+3 primera frase contradice creencia común o genera disonancia cognitiva
+HOOK (max 9 pts):
++3 primera frase contradice creencia comun o genera disonancia cognitiva
 +3 contiene dato concreto (cifra, edad, cantidad) en los primeros 10 segundos
 +2 hace pregunta que describe exactamente el dolor del espectador
 +1 tiene loop abierto que obliga a seguir viendo
 
-HOLD (máx 6 pts):
-+3 historia personal completa (situación → problema → resolución)
-+2 giro narrativo o revelación que cambia el marco de la idea
+HOLD (max 6 pts):
++3 historia personal completa (situacion -> problema -> resolucion)
++2 giro narrativo o revelacion que cambia el marco de la idea
 +1 alta densidad de valor (varias ideas fuertes en poco tiempo)
 
-REWARD (máx 4 pts):
-+2 genera debate o comentarios ("¿esto es verdad?", "yo también pasé por esto")
+REWARD (max 4 pts):
++2 genera debate o comentarios ('esto es verdad?', 'yo tambien pase por esto')
 +2 termina con frase que el espectador quiere guardar o enviar a alguien
 
 PENALIZACIONES:
--2 primeros 3 segundos débiles, genéricos o de introducción
--2 más de 10 segundos consecutivos sin frase de alto valor
--1 clip depende de contexto muy específico que el espectador no tiene
+-2 primeros 3 segundos debiles, genericos o de introduccion
+-2 mas de 10 segundos consecutivos sin frase de alto valor
+-1 clip depende de contexto muy especifico que el espectador no tiene
 
-UMBRAL: válido SOLO si score >= 5.
+UMBRAL: valido SOLO si score >= 5.
 
-DURACIÓN: MÍNIMO 23s | IDEAL 40-60s | MÁXIMO 75s
-Si una idea poderosa dura más de 75s, extrae el sub-fragmento más intenso.
+DURACION: MINIMO 25 segundos | IDEAL 45-60 segundos | MAXIMO 90 segundos
+Si una idea poderosa dura mas de 90 segundos, extrae el sub-fragmento mas intenso.
 
-AUTONOMÍA NARRATIVA FLEXIBLE:
-Se permiten referencias a conceptos universales (dinero, tiempo, éxito, fracaso,
-relaciones, salud). NO referencias a personas o eventos específicos sin explicar.
+AUTONOMIA NARRATIVA FLEXIBLE:
+Se permiten referencias a conceptos universales (dinero, tiempo, exito, fracaso,
+relaciones, salud). NO referencias a personas o eventos especificos sin explicar.
 
-DIVERSIDAD TEMÁTICA:
-Cada clip debe tener un ángulo diferente. No selecciones dos clips que digan
-esencialmente lo mismo aunque estén en distintos momentos del vídeo.
+DIVERSIDAD TEMATICA:
+Cada clip debe tener un angulo diferente. No selecciones dos clips que digan
+esencialmente lo mismo aunque esten en distintos momentos del video.
 
-CLASIFICACIÓN (máx 2 etiquetas por clip):
-- EXPLOSION: Desafía narrativa dominante, puede generar desacuerdo
-- AUTORIDAD: Framework mental claro, enseña psicología o lógica fuerte
-- CONVERSION: Identifica dolor específico, señala error concreto, CTA implícito
+CLASIFICACION (max 2 etiquetas por clip):
+- EXPLOSION: Desafia narrativa dominante, puede generar desacuerdo
+- AUTORIDAD: Framework mental claro, ensena psicologia o logica fuerte
+- CONVERSION: Identifica dolor especifico, senala error concreto, CTA implicito
 MIX IDEAL: 50% EXPLOSION | 30% AUTORIDAD | 20% CONVERSION
 
-TÍTULOS: En español, orientados a búsqueda social real.
-Ej: "¿Por qué siempre abandono mis metas?" > "Cómo tener éxito"
+TITULOS: En espanol, orientados a busqueda social real.
+Ej: 'Por que siempre abandono mis metas?' > 'Como tener exito'
 
-MICRO-MOVIMIENTOS: Zooms/cortes cada 2-4s para mantener engagement visual.
+MICRO-MOVIMIENTOS: Zooms/cortes cada 2-4 segundos para mantener engagement visual.
 
 ICONOS: 4-7 iconos por clip alineados con las palabras clave.
 KEYWORDS DISPONIBLES: 'money', 'cash', 'rich', 'idea', 'think', 'mind', 'warning',
@@ -614,145 +536,197 @@ KEYWORDS DISPONIBLES: 'money', 'cash', 'rich', 'idea', 'think', 'mind', 'warning
 'home', 'world', 'travel', 'sun', 'moon', 'star_special', 'music', 'sound',
 'gift', 'party', 'health'
 
-EDIT_EVENTS — REGLA CRÍTICA:
-Los "time" de zooms e iconos deben corresponder exactamente al "start" de una
-palabra real en la sección PALABRAS CON TIMESTAMPS al final de este prompt.
+EDIT_EVENTS - REGLA CRITICA:
+Los 'time' de zooms e iconos deben corresponder exactamente al 'start' de una
+palabra real en la seccion PALABRAS CON TIMESTAMPS al final de este prompt.
 NO inventes tiempos. Usa solo timestamps que existan en esa lista.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FORMATO DE SALIDA JSON — ESTRUCTURA OBLIGATORIA
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+----------------------------------------
+FORMATO DE SALIDA DE TEXTO (ETIQUETAS ESTRICTAS)
+----------------------------------------
 
-Devuelve SIEMPRE este objeto completo. Primero "context", luego "clips".
-Si ningún clip alcanza score >= 5, devuelve "clips" como array vacío.
+DEBES RESPONDER EXCLUSIVAMENTE CON TEXTO PLANO USANDO ETIQUETAS. ABSOLUTAMENTE NADA DE JSON O FORMATOS DE CODIGO.
+Sigue esta plantilla sin desvios:
 
-{{
-  "context": {{
-    "tema_central": "<string>",
-    "is_podcast": <boolean>,
-    "account_id": <number|null>,
-    "tono": "<string>",
-    "angulo_unico": "<string>",
-    "datos_concretos": ["<string>"],
-    "frases_gancho": ["<string>"],
-    "momentos_intensos": [
-      {{
-        "tiempo_inicio": 0.0,
-        "tiempo_fin": 0.0,
-        "descripcion": "<string>"
-      }}
-    ]
-  }},
-  "clips": [
-    {{
-      "id": 1,
-      "title": "<Título en español para búsqueda social>",
-      "start": 0.0,
-      "end": 0.0,
-      "score": 0,
-      "hook_type": "<CONTRAINTUITIVO / DATO_IMPACTO / PREGUNTA_DOLOR / DIAGNOSTICO / LOOP_ABIERTO>",
-      "score_breakdown": {{
-        "hook": 0,
-        "hold": 0,
-        "reward": 0,
-        "penalties": 0
-      }},
-      "score_factors": ["<factor>"],
-      "classification": ["EXPLOSION"],
-      "dominant_emotion": "<indignación / revelación / validación / urgencia / esperanza>",
-      "virality_level": 8,
-      "reasoning": "<Por qué puede volverse viral — 1-2 líneas en español>",
-      "comment_trigger": "<La frase que va a generar más comentarios>",
-      "edit_events": {{
-        "zooms": [{{"time": 0.0, "type": "in", "intensity": 0.5}}],
-        "icons": [{{"time": 0.0, "keyword": "keyword", "layout": "center", "duration": 1.5}}],
-        "b_rolls": [{{"time": 0.0, "query": "English Pexels search query", "duration": 3.0}}]
-      }}
-    }}
-  ]
-}}
+[CONTEXT_START]
+Tema Central: <escribe el tema central>
+Es Podcast: <true o false>
+Tono: <describe el tono>
+[CONTEXT_END]
+
+Para cada clip que cumpla (Score minimo 5), crea un bloque asi:
+
+[CLIP_START]
+Title: <Titulo en espanol para busqueda social>
+Start: <0.0>
+End: <0.0>
+Score: <0 a 11>
+Is Title Clip: <true o false>
+Hook Type: <CONTRAINTUITIVO / DATO_IMPACTO / PREGUNTA_DOLOR / DIAGNOSTICO / LOOP_ABIERTO>
+Reasoning: <Minimo 1 linea de por que es viral>
+Classification: <EXPLOSION / AUTORIDAD / CONVERSION>
+---
+Zoom: <time> | <in> | <0.5>
+Icon: <time> | <keyword> | <layout> | <duration>
+Broll: <time> | <English query> | <duration>
+[CLIP_END]
+
+Reglas para los EVENTOS (Zooms, Iconos, Brolls):
+- Si no hay eventos, simplemente no escribas la linea.
+- Usa los timestamps de las 'PALABRAS CON TIMESTAMPS' exactamente.
+- Formato EXACTO separado por ' | '. Ejemplo: 'Icon: 15.5 | money | center | 1.5'.
 
 Ordena los clips de MAYOR a MENOR score.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TRANSCRIPCIÓN — SEGMENTOS
+----------------------------------------
+TRANSCRIPCION - SEGMENTOS
 (usa para entender la narrativa y seleccionar clips)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+----------------------------------------
 {transcript_text}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TRANSCRIPCIÓN — PALABRAS CON TIMESTAMPS PRECISOS
-(usa SOLO esto para los "time" de zooms e iconos en edit_events)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+----------------------------------------
+TRANSCRIPCION - PALABRAS CON TIMESTAMPS PRECISOS
+(usa SOLO esto para los 'time' de zooms e iconos en edit_events)
+----------------------------------------
 {transcript_words}
 """
 
-    time.sleep(1)
     response = None
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
-        )
+    max_retries = 3
+    import re
 
-        raw_text = response.text.strip()
-        if raw_text.startswith("```"):
-            raw_text = raw_text.split("```")[1]
-            if raw_text.startswith("json"): raw_text = raw_text[4:]
-
-        import re
-        clean_text = re.sub(r'\s*\(use [^)]+\)', '', raw_text)
-
-        result = json.loads(clean_text)
-
-        # Loguear contexto si está disponible
-        ctx = result.get("context", {})
-        if ctx:
-            logger.info(
-                f"Contexto extraído — Tema: '{ctx.get('tema_central', 'N/A')}' | "
-                f"Tono: {ctx.get('tono', 'N/A')} | "
-                f"Momentos intensos: {len(ctx.get('momentos_intensos', []))}"
+    for attempt in range(max_retries):
+        logger.info(f"Llamando a Gemini (Intento {attempt + 1}/{max_retries})...")
+        time.sleep(1)
+        try:
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="text/plain"),
             )
 
-        if "clips" in result and len(result["clips"]) > 0:
-            # Umbral único: score >= 5
-            valid_clips = [c for c in result["clips"] if c.get("score", 0) >= 5]
-            rejected_count = len(result["clips"]) - len(valid_clips)
-            if rejected_count > 0:
-                logger.info(f"Filtrados {rejected_count} clips con score < 5")
+            raw_text = response.text.strip()
+            
+            # --- PARSEADOR ROBUSTO BASADO EN REGEX Y BLOQUES ---
+            result = {
+                "context": {},
+                "clips": []
+            }
+            
+            # 1. Parsear Contexto
+            context_match = re.search(r'\[CONTEXT_START\](.*?)\[CONTEXT_END\]', raw_text, re.DOTALL)
+            if context_match:
+                ctx_text = context_match.group(1)
+                
+                # Extraer campos clave
+                tema_match = re.search(r'Tema Central:\s*(.*)', ctx_text)
+                podcast_match = re.search(r'Es Podcast:\s*(.*)', ctx_text, re.IGNORECASE)
+                tono_match = re.search(r'Tono:\s*(.*)', ctx_text)
+                
+                if tema_match: result["context"]["tema_central"] = tema_match.group(1).strip()
+                if podcast_match: result["context"]["is_podcast"] = "true" in podcast_match.group(1).lower()
+                if tono_match: result["context"]["tono"] = tono_match.group(1).strip()
+            
+            # 2. Parsear Clips
+            clips_blocks = re.findall(r'\[CLIP_START\](.*?)\[CLIP_END\]', raw_text, re.DOTALL)
+            
+            for idx, c_text in enumerate(clips_blocks):
+                clip_obj = {
+                    "id": idx + 1,
+                    "title": "", "start": 0.0, "end": 0.0, "score": 0, "is_title_clip": False, "hook_type": "N/A",
+                    "reasoning": "", "classification": [], "edit_events": {"zooms": [], "icons": [], "b_rolls": []}
+                }
+                
+                # Campos directos
+                for line in c_text.split('\n'):
+                    line = line.strip()
+                    if line.startswith('Title:'): clip_obj['title'] = line.replace('Title:', '').strip()
+                    elif line.startswith('Start:'): 
+                        try: clip_obj['start'] = float(line.replace('Start:', '').strip())
+                        except: pass
+                    elif line.startswith('End:'): 
+                        try: clip_obj['end'] = float(line.replace('End:', '').strip())
+                        except: pass
+                    elif line.startswith('Score:'): 
+                        try: clip_obj['score'] = float(line.replace('Score:', '').strip())
+                        except: pass
+                    elif line.startswith('Is Title Clip:'):
+                        clip_obj['is_title_clip'] = 'true' in line.lower()
+                    elif line.startswith('Hook Type:'): clip_obj['hook_type'] = line.replace('Hook Type:', '').strip()
+                    elif line.startswith('Reasoning:'): clip_obj['reasoning'] = line.replace('Reasoning:', '').strip()
+                    elif line.startswith('Classification:'): clip_obj['classification'] = [line.replace('Classification:', '').strip()]
+                    
+                    # Eventos
+                    elif line.startswith('Zoom:'):
+                        parts = [p.strip() for p in line.replace('Zoom:', '').split('|')]
+                        if len(parts) >= 3:
+                            try: clip_obj["edit_events"]["zooms"].append({"time": float(parts[0]), "type": parts[1], "intensity": float(parts[2])})
+                            except: pass
+                    elif line.startswith('Icon:'):
+                        parts = [p.strip() for p in line.replace('Icon:', '').split('|')]
+                        if len(parts) >= 4:
+                            try: clip_obj["edit_events"]["icons"].append({"time": float(parts[0]), "keyword": parts[1], "layout": parts[2], "duration": float(parts[3])})
+                            except: pass
+                    elif line.startswith('Broll:'):
+                        parts = [p.strip() for p in line.replace('Broll:', '').split('|')]
+                        if len(parts) >= 3:
+                            try: clip_obj["edit_events"]["b_rolls"].append({"time": float(parts[0]), "query": parts[1], "duration": float(parts[2])})
+                            except: pass
+                
+                # Solo agregar si validó las métricas clave
+                if clip_obj["score"] >= 5 and clip_obj["end"] > clip_obj["start"]:
+                    result["clips"].append(clip_obj)
 
-            # Validar duración (margen de seguridad 18-90s)
-            duration_valid = []
-            for c in valid_clips:
-                clip_duration = float(c.get('end', 0)) - float(c.get('start', 0))
-                if 18 <= clip_duration <= 90:
-                    duration_valid.append(c)
-                else:
-                    logger.info(f"Clip descartado '{c.get('title', '')}' — duración {clip_duration:.1f}s fuera de rango")
-
-            result["clips"] = duration_valid
-
-            if duration_valid:
-                best = duration_valid[0]
+            # Loguear contexto si está disponible
+            ctx = result.get("context", {})
+            if ctx:
                 logger.info(
-                    f"Motor Viral v3.0 encontró {len(duration_valid)} clips válidos (score ≥ 5). "
-                    f"Mejor: score={best.get('score')} | hook={best.get('hook_type')} | "
-                    f"inicia en {best.get('start')}s"
+                    f"Contexto extraído — Tema: '{ctx.get('tema_central', 'N/A')}' | "
+                    f"Tono: {ctx.get('tono', 'N/A')} | "
+                    f"Momentos intensos: {len(ctx.get('momentos_intensos', []))}"
                 )
+
+            if "clips" in result and len(result["clips"]) > 0:
+                # Umbral único: score >= 5
+                valid_clips = [c for c in result["clips"] if c.get("score", 0) >= 5]
+                rejected_count = len(result["clips"]) - len(valid_clips)
+                if rejected_count > 0:
+                    logger.info(f"Filtrados {rejected_count} clips con score < 5")
+
+                # Validar duración (margen de seguridad 25-90s)
+                duration_valid = []
+                for c in valid_clips:
+                    clip_duration = float(c.get('end', 0)) - float(c.get('start', 0))
+                    if 25 <= clip_duration <= 90:
+                        duration_valid.append(c)
+                    else:
+                        logger.info(f"Clip descartado '{c.get('title', '')}' — duración {clip_duration:.1f}s fuera de rango")
+
+                result["clips"] = duration_valid
+
+                if duration_valid:
+                    best = duration_valid[0]
+                    logger.info(
+                        f"Motor Viral v3.0 encontró {len(duration_valid)} clips válidos (score ≥ 5). "
+                        f"Mejor: score={best.get('score')} | hook={best.get('hook_type')} | "
+                        f"inicia en {best.get('start')}s"
+                    )
+                else:
+                    logger.warning("Todos los clips filtrados — SIN CLIPS con intensidad suficiente")
             else:
-                logger.warning("Todos los clips filtrados — SIN CLIPS con intensidad suficiente")
-        else:
-            logger.warning("Gemini no encontró clips — INTENSIDAD INSUFICIENTE en la transcripción")
+                logger.warning("Gemini no encontró clips — INTENSIDAD INSUFICIENTE en la transcripción")
 
-        return result
+            return result
 
-    except Exception as e:
-        err_msg = f"Error procesando respuesta de Gemini. Error: {str(e)}"
-        if response and hasattr(response, 'text'):
-            err_msg += f" | Respuesta raw: {response.text[:500]}..."
-        logger.exception(err_msg)
-        raise e
+        except Exception as e:
+            err_msg = f"Error en intento {attempt + 1}: {str(e)}"
+            if response and hasattr(response, 'text'):
+                err_msg += f" | Respuesta raw truncada: {response.text[-500:]}"
+            logger.warning(err_msg)
+            if attempt == max_retries - 1:
+                logger.error("Se agotaron los reintentos de Gemini para análisis viral.")
+                raise e
+            time.sleep(2)
 
 
 def extract_frame(video_path, time_in_seconds, output_path):
@@ -774,7 +748,7 @@ def extract_frame(video_path, time_in_seconds, output_path):
         raise e
 
 def detect_face_center_mediapipe(image_path):
-    """Uses Google's MediaPipe Tasks API to detect faces — works in any lighting/angle."""
+    """Uses Google MediaPipe Tasks API to detect faces - works in any lighting/angle."""
     try:
         import mediapipe as mp
         
@@ -1121,9 +1095,9 @@ def snap_to_sentence_start(start_time, words, lookback_seconds=4.0):
     Si el start_time cae en medio de una oración, retrocede al inicio
     de la frase más cercana dentro de una ventana de lookback_seconds.
     Detecta inicio de frase por dos señales:
-      1. La palabra empieza con mayúscula (inicio de oración)
-      2. Hay una pausa larga antes de la palabra (>0.4s entre palabras)
-    Siempre retrocede al candidato más reciente antes del start_time
+      1. La palabra empieza con mayuscula (inicio de oracion)
+      2. Hay una pausa larga antes de la palabra (>0.4 segundos entre palabras)
+    Siempre retrocede al candidato mas reciente antes del start_time
     para no alargar el clip más de lo necesario.
     """
     window_start = max(0.0, start_time - lookback_seconds)
@@ -1248,25 +1222,25 @@ if __name__ == "__main__":
         transcript = transcribe_audio(video_file)
         logger.info(f"   ✅ [PHASE 2] Transcription completed in {time.time() - t_start:.2f}s")
             
-        # 2.5 GLOBAL REFINEMENT / TRANSLATION
-        t_start = time.time()
-        # Even for Spanish, we run it through Gemini to fix Whisper spelling mistakes (like 'ChatGPT')
-        # using a STRICT literal prompt to avoid paraphrasing.
-        full_translated_words = translate_full_transcript_global(
-            transcript['segments'], 
-            source_lang=transcript.get("language", "en")
-        )
-        logger.info(f"   ✅ [PHASE 2.5] Transcript Refinement completed in {time.time() - t_start:.2f}s")
 
-        # 3. Analyze Transcript with Gemini (New v3.0 logic with context and account detection)
+        # 3. Analyze Transcript with Gemini (v3.0 logic with context and account detection)
         t_start = time.time()
-        analysis_result = analyze_with_gemini(transcript, user_id=user_id)
+        
+        # Determine video title for Gemini context
+        video_title_for_ai = title or "Unknown Video"
+        if youtube_url and youtube_url != "Local Test File" and video_title_for_ai == "Unknown Video":
+            try:
+                with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
+                    info = ydl.extract_info(youtube_url, download=False)
+                    video_title_for_ai = info.get('title', "Project")
+            except: pass
+
+        analysis_result = analyze_with_gemini(transcript, user_id=user_id, video_title=video_title_for_ai)
         logger.info(f"   ✅ [PHASE 3] Gemini Viral Analysis completed in {time.time() - t_start:.2f}s")
         
         context = analysis_result.get("context", {})
         raw_clips = analysis_result.get("clips", [])
         is_podcast_global = context.get("is_podcast", False)
-        selected_account_id = context.get("account_id")
         logger.info(f"GEMINI CONTEXT — Format: {'Podcast/Interview' if is_podcast_global else 'Monologue/Tutorial'}")
 
         if not analysis_result or not raw_clips:
@@ -1315,12 +1289,37 @@ if __name__ == "__main__":
                         "end": w['end'] - start_time
                     })
             
-            # 3.7 Extract Spanish Translation from Global Pool (CLONE to avoid shared mutation)
-            translated_words = [
-                {**w, "start": max(0.0, w["start"] - start_time), "end": w["end"] - start_time} 
-                for w in full_translated_words 
-                if w['end'] > start_time and w['start'] < end_time
-            ]
+            # 3.7 Extract Spanish Translation exactly for this clip using Gemini (Local Context + Short Segment Timestamps)
+            t_trans = time.time()
+            
+            clip_segments = []
+            for seg in transcript.get("segments", []):
+                # Verificar traslape con los tiempos del clip actual
+                if seg["end"] > start_time and seg["start"] < end_time:
+                    c_start = max(0.0, seg["start"] - start_time)
+                    c_end = seg["end"] - start_time
+                    # Palabras que cayeron en este micro-segmento
+                    seg_words = [w for w in adjusted_words if w['start'] >= c_start and w['end'] <= c_end]
+                    
+                    clip_segments.append({
+                        "text": seg["text"].strip(),
+                        "start": c_start,
+                        "end": c_end,
+                        "words": seg_words
+                    })
+            
+            if clip_segments:
+                try:
+                    translated_words = translate_full_transcript_global(clip_segments, source_lang=transcript.get("language", "en"))
+                    if not translated_words:
+                        translated_words = adjusted_words
+                except Exception as e:
+                    logger.error(f"      ❌ Local Clip Translation failed: {e}. Using original words.")
+                    translated_words = adjusted_words
+            else:
+                translated_words = adjusted_words
+                
+            logger.info(f"      ✅ Clip Contextual Translation completed in {time.time() - t_trans:.2f}s")
             
             # 3.8 FIRST: Crop and Cut the physical clip (Lossless)
             t_clip = time.time()
@@ -1369,40 +1368,23 @@ if __name__ == "__main__":
         shared_detector.close()
         shared_face_detector.close()
 
-        # Fetch the original video title for the manifest
-        video_title = "Unknown Video"
-        try:
-            with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
-                info = ydl.extract_info(youtube_url, download=False)
-                video_title = info.get('title', "Project")
-        except: pass
-
         final_data = {
             "clips": processed_clips,
             "version": version,
             "user_id": user_id,
-            "video_title": video_title,
-            "account_id": selected_account_id,
+            "video_title": video_title_for_ai,
             "is_podcast": is_podcast_global,
-            "niche_name": initial_niche,
+            "niche_name": initial_niche or "Generic",
+            "instagram_handle": "rocotoclip",
             # For backward compatibility, keep top clip markers at root
-            "words": processed_clips[0]["words"],
-            "words_es": processed_clips[0]["words_es"],
-            "video_url": processed_clips[0]["video_url"],
-            "audio_url": processed_clips[0]["audio_url"]
+            "words": processed_clips[0]["words"] if processed_clips else [],
+            "words_es": processed_clips[0]["words_es"] if processed_clips else [],
+            "video_url": processed_clips[0]["video_url"] if processed_clips else "",
+            "audio_url": processed_clips[0]["audio_url"] if processed_clips else ""
         }
 
-        # If we have an account_id detected or a niche provided, enrich the manifest
-        if final_data["account_id"]:
-            # Try to get niche details
-            accounts = get_supabase_accounts(user_id)
-            acc = next((a for a in accounts if str(a['id']) == str(final_data["account_id"])), None)
-            if acc:
-                final_data["instagram_handle"] = acc.get("name")
-                final_data["niche_name"] = acc.get("niche")
-        elif initial_niche:
-            # If no account detected but niche specified, use it
-            final_data["niche_name"] = initial_niche
+        # Ensure niche_name exists to avoid frontend errors
+        if not final_data.get("niche_name"): final_data["niche_name"] = "Generic"
         
         with open(TRANSCRIPT_FILE, "w", encoding="utf-8") as f:
             json.dump(final_data, f, ensure_ascii=False, indent=2)
