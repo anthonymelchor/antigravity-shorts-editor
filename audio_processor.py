@@ -102,6 +102,14 @@ def mix_audio_with_ducking(voice_path, music_path, output_path, words=None, bg_v
         return False
 
     try:
+        actual_output = output_path
+        requires_replace = False
+        
+        # FFmpeg cannot read and write to the exact same file simultaneously
+        if os.path.abspath(voice_path) == os.path.abspath(output_path):
+            actual_output = output_path + ".tmp.wav"
+            requires_replace = True
+
         command = [
             "ffmpeg", "-y",
             "-i", voice_path,
@@ -111,9 +119,14 @@ def mix_audio_with_ducking(voice_path, music_path, output_path, words=None, bg_v
             "-c:a", "pcm_s16le",
             "-ar", "44100",
             "-ac", "2",
-            output_path
+            actual_output
         ]
         subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        if requires_replace:
+            import shutil
+            shutil.move(actual_output, output_path)
+            
         logger.info("Audio mixing successful.")
         return True
     except Exception as e:
