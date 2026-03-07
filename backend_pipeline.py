@@ -46,8 +46,10 @@ if os.name == "nt":
         os.environ["PATH"] = ffmpeg_bin + os.pathsep + os.environ.get("PATH", "")
 
 def download_video(url, output_path):
+    """Downloads video and returns (file_path, video_title) tuple."""
     logger.info(f"Downloading video from {url}...")
     try:
+        video_title = None
         ydl_opts = {
             'format': 'bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440]+bestaudio/best[height<=1440]',
             'merge_output_format': 'mp4',
@@ -55,9 +57,10 @@ def download_video(url, output_path):
             'overwrites': True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        logger.info(f"Video downloaded to {output_path}")
-        return output_path
+            info = ydl.extract_info(url, download=True)
+            video_title = info.get('title') if info else None
+        logger.info(f"Video downloaded to {output_path} | Title: {video_title or 'Unknown'}")
+        return output_path, video_title
     except Exception as e:
         logger.error(f"Failed to download video: {str(e)}")
         raise e
@@ -90,11 +93,16 @@ def extract_audio(video_path, output_audio_path=None, format="wav", bitrate="32k
         return None
 
 
-def transcribe_audio_local(video_path, model_size="base"):
-    """Original Local Whisper transcription."""
+def transcribe_audio_local(video_path, model_size="base", model=None):
+    """
+    Local Whisper transcription.
+    - model_size: 'base' (default, recommended) or 'tiny' (faster) / 'small'/'medium' (more accurate).
+    - model: pass a pre-loaded WhisperModel instance to avoid reloading on every call.
+    """
     logger.info(f"Transcribing {video_path} locally (Whisper {model_size})...")
     from faster_whisper import WhisperModel
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    if model is None:
+        model = WhisperModel(model_size, device="cpu", compute_type="int8")
     segments, info = model.transcribe(video_path, beam_size=1, word_timestamps=True, vad_filter=True)
     
     words = []
@@ -436,53 +444,46 @@ def translate_full_transcript_global(segments_data, source_lang="en"):
 
 
 
-def analyze_viral_clips_from_audio(audio_path, user_id=None, video_title="Unknown"):
+def analyze_viral_clips_from_text(transcript_json, user_id=None, video_title="Unknown"):
     """
-    MOTOR DE EXTRACCIÓN VIRAL v3.5 (HYBRID) - Gemini escucha Audio
-    
-    A diferencia de la v3.0, no necesitamos transcripción previa.
-    Gemini recibe el archivo de audio directamente y usa su capacidad multimodal
-    para entender el ritmo, tono y contenido, devolviendo los mejores clips.
+    MOTOR DE EXTRACCIÓN VIRAL v4.0 (TRANSCRIPT) - Gemini lee la transcripción de Whisper
     """
-    logger.info("=== MOTOR DE EXTRACCIÓN VIRAL v3.5 (Hybrid Audio) ===")
+    logger.info("=== MOTOR DE EXTRACCIÓN VIRAL v4.0 (Text Transcript) ===")
     api_key = os.environ.get("GEMINI_API_KEY")
     client = genai.Client(api_key=api_key)
 
-    # 1. Subida del Audio a Gemini
-    logger.info(f"Subiendo audio para análisis viral... {os.path.basename(audio_path)}")
-    audio_file = client.files.upload(file=audio_path)
-    
-    while audio_file.state == "PROCESSING":
-        time.sleep(5)
-        audio_file = client.files.get(name=audio_file.name)
-        
-    if audio_file.state == "FAILED":
-        raise RuntimeError(f"Fallo en carga de audio para análisis: {audio_file.error}")
+    # Preparar el texto para el prompt
+    text_content = ""
+    for seg in transcript_json.get("segments", []):
+        text_content += f"[{seg['start']:.1f}s - {seg['end']:.1f}s] {seg['text']}\n"
 
     prompt = f"""
-Eres el mejor editor de contenido viral del mundo. Tu misión es ESCUCHAR este audio y extraer los mejores momentos para convertirlos en Shorts/Reels/TikToks.
+Eres el mejor editor de contenido viral del mundo. Tu misión es LEER esta transcripción y extraer los mejores momentos para convertirlos en Shorts/Reels/TikToks.
 
 TITULO DEL VIDEO (CONTEXTO): {video_title}
 
 REGLAS DE ORO:
 1. Encuentra momentos con HOOK fuerte, HOLD de retención y REWARD al final.
-2. Extrae TODOS los momentos virales que encuentres (Entre 5 y 20 si es un video largo).
-3. Asegúrate de que los Timestamps sean precisos dentro de lo que escuchas.
-4. DURACIÓN OBLIGATORIA: Cada clip DEBE durar entre 25 y 90 segundos. No ignores esto.
+2. Cada clip DEBE durar entre 25 y 90 segundos. Si el momento es muy corto, incluye el contexto anterior (pregunta/introducción) o posterior. OBLIGATORIO.
+3. Extrae TODOS los grandes momentos (hasta 15 si el video es rico en contenido).
+4. Los Start y End deben ser precisos basados en los tiempos que ves en el texto.
+
+TRANSCRIPCIÓN:
+{text_content}
 
 FORMATO DE RESPUESTA (ETIQUETAS ESTRICTAS):
 Debes responder EXCLUSIVAMENTE con texto plano usando estas etiquetas:
 
 [CONTEXT_START]
-Tema Central: <resumen>
-Es Podcast: <true si es diálogo, false si monólogo>
+Tema Central: <resumen del video>
+Es Podcast: <true/false>
 Tono: <motivacional/polemico/etc>
 [CONTEXT_END]
 
 [CLIP_START]
-Title: <Titulo viral>
-Start: <tiempo en segundos, ej: 120.5>
-End: <tiempo en segundos, ej: 180.0>
+Title: <Titulo viral llamativo>
+Start: <tiempo en segundos, ej: 125.5>
+End: <tiempo en segundos, ej: 185.0>
 Score: <1 a 11>
 Is Title Clip: <true/false>
 Hook Type: <CONTRAINTUITIVO/DATO_IMPACTO/PREGUNTA_DOLOR/DIAGNOSTICO/LOOP_ABIERTO>
@@ -493,25 +494,17 @@ Classification: <EXPLOSION/AUTORIDAD/CONVERSION>
 Responde ahora:
 """
 
-    response = None
     max_retries = 3
-    import re
-
     for attempt in range(max_retries):
-        logger.info(f"Pidiendo a Gemini que escuche el audio (Intento {attempt + 1}/{max_retries})...")
+        logger.info(f"Pidiendo a Gemini que analice el texto (Intento {attempt + 1}/{max_retries})...")
         try:
             response = client.models.generate_content(
-                model='gemini-2.5-flash', # Requerido por usuario para análisis viral
-                contents=[prompt, audio_file],
+                model='gemini-2.5-flash',
+                contents=prompt,
                 config=types.GenerateContentConfig(response_mime_type="text/plain"),
             )
-            
-            # Limpieza inmediata
-            client.files.delete(name=audio_file.name)
 
             raw_text = response.text.strip()
-            
-            # Parseador robusto
             result = {"context": {}, "clips": []}
             
             context_match = re.search(r'\[CONTEXT_START\](.*?)\[CONTEXT_END\]', raw_text, re.DOTALL)
@@ -525,40 +518,25 @@ Responde ahora:
             for idx, c_text in enumerate(clips_blocks):
                 clip_obj = {
                     "id": idx + 1,
-                    "title": "", "start": 0.0, "end": 0.0, "score": 0, "is_title_clip": False, "hook_type": "N/A",
+                    "title": "", "start": 0.0, "end": 0.0, "score": 0, "is_title_clip": False,
                     "reasoning": "", "classification": [], "edit_events": {"zooms": [], "icons": [], "b_rolls": []}
                 }
-                
-                # Campos directos
                 for line in c_text.split('\n'):
                     line = line.strip()
                     if line.startswith('Title:'): clip_obj['title'] = line.replace('Title:', '').strip()
-                    elif line.startswith('Start:'): 
-                        try: clip_obj['start'] = float(re.findall(r'(\d+\.?\d*)', line)[0])
-                        except: pass
-                    elif line.startswith('End:'): 
-                        try: clip_obj['end'] = float(re.findall(r'(\d+\.?\d*)', line)[0])
-                        except: pass
-                    elif line.startswith('Score:'): 
-                        try: clip_obj['score'] = float(re.findall(r'(\d+\.?\d*)', line)[0])
-                        except: pass
-                    elif line.startswith('Is Title Clip:'):
-                        clip_obj['is_title_clip'] = 'true' in line.lower()
-                    elif line.startswith('Hook Type:'): clip_obj['hook_type'] = line.replace('Hook Type:', '').strip()
-                    elif line.startswith('Reasoning:'): clip_obj['reasoning'] = line.replace('Reasoning:', '').strip()
-                    elif line.startswith('Classification:'): clip_obj['classification'] = [line.replace('Classification:', '').strip()]
+                    elif line.startswith('Start:'): clip_obj['start'] = float(re.findall(r'(\d+\.?\d*)', line)[0])
+                    elif line.startswith('End:'): clip_obj['end'] = float(re.findall(r'(\d+\.?\d*)', line)[0])
+                    elif line.startswith('Score:'): clip_obj['score'] = float(re.findall(r'(\d+\.?\d*)', line)[0])
+                    elif line.startswith('Is Title Clip:'): clip_obj['is_title_clip'] = 'true' in line.lower()
                 
-                # Solo agregar si validó las métricas clave y la duración mínima (25-90s)
                 duration = clip_obj["end"] - clip_obj["start"]
-                if clip_obj["score"] >= 5 and 25 <= duration <= 100: # 100s de margen para post-trim
+                if clip_obj["score"] >= 5 and 25 <= duration <= 100:
                     result["clips"].append(clip_obj)
-                else:
-                    logger.warning(f"Clip '{clip_obj.get('title')}' descartado por duración: {duration:.1f}s")
             
             return result
 
         except Exception as e:
-            logger.error(f"Error en análisis de audio Gemini: {e}")
+            logger.error(f"Error en análisis de texto Gemini: {e}")
             if attempt == max_retries - 1: raise e
             time.sleep(2)
 def extract_frame(video_path, time_in_seconds, output_path):
@@ -981,6 +959,9 @@ if __name__ == "__main__":
     parser.add_argument("--user_id", help="User ID owner of this process")
     parser.add_argument("--title", help="Video title for folder naming")
     parser.add_argument("--niche", help="Specified niche for the project")
+    parser.add_argument("--whisper_model", default="base",
+                        choices=["tiny", "base", "small", "medium", "large"],
+                        help="Whisper model size (default: base). Use 'tiny' for speed or 'small'/'medium' for higher accuracy.")
     
     args = parser.parse_known_args()[0]
     
@@ -989,6 +970,7 @@ if __name__ == "__main__":
     user_id = args.user_id
     title = args.title
     initial_niche = args.niche
+    whisper_model_size = args.whisper_model  # 'tiny' by default
 
     # Define project directory structure with readable folder name
     folder_name = f"{slugify(title)}_{version}" if title else version
@@ -1032,14 +1014,19 @@ if __name__ == "__main__":
                 logger.error("❌ MODO TEST: 'input.mp4' no encontrado en la raíz. Abortando.")
                 raise FileNotFoundError("'input.mp4' missing for test mode.")
         elif youtube_url:
-            video_file = download_video(youtube_url, INPUT_FILE)
+            video_file, fetched_title = download_video(youtube_url, INPUT_FILE)
+            # Use title fetched during download — no second yt-dlp call needed
+            if not title and fetched_title:
+                title = fetched_title
         elif os.path.exists("input_full.mp4"):
             video_file = "input_full.mp4"
             print("Using legacy input_full.mp4")
         else:
             # Fallback default
             youtube_url = "https://www.youtube.com/watch?v=okL1xL_hHOw"
-            video_file = download_video(youtube_url, INPUT_FILE)
+            video_file, fetched_title = download_video(youtube_url, INPUT_FILE)
+            if not title and fetched_title:
+                title = fetched_title
         # --- FIN MODO TEST ---
         logger.info(f"   ✅ [PHASE 1] Download completed in {time.time() - t_start:.2f}s")
         
@@ -1049,34 +1036,35 @@ if __name__ == "__main__":
         # The validate_universal_fix.py approach (using the original video directly) is correct.
         logger.info(f"   ✅ [PHASE 1.5] Skipping proxy — framing will use original video directly (480px internal downscale)")
         
-        # 2. Extract Full Audio for analysis (MP3 for weight optimization)
-        t_start = time.time()
-        FULL_AUDIO = os.path.join(PROJECT_DIR, "audio_analysis_optimized.mp3")
-        extract_audio(video_file, FULL_AUDIO, format="mp3", bitrate="32k") 
-        logger.info(f"   ✅ [PHASE 2] Audio extraction (MP3) completed in {time.time() - t_start:.2f}s")
+        # 2. Transcribe Full Audio with Whisper (Local) — model loaded ONCE and reused
+        t_trans = time.time()
+        FULL_AUDIO = os.path.join(PROJECT_DIR, "audio_for_whisper.mp3")
+        extract_audio(video_file, FULL_AUDIO, format="mp3", bitrate="64k")
+        
+        logger.info(f"   🧠 Loading Whisper model '{whisper_model_size}' into memory (once)...")
+        from faster_whisper import WhisperModel as _WhisperModel
+        shared_whisper = _WhisperModel(whisper_model_size, device="cpu", compute_type="int8")
+        
+        full_transcript = transcribe_audio_local(FULL_AUDIO, model_size=whisper_model_size, model=shared_whisper)
+        logger.info(f"   ✅ [PHASE 2] Full Transcription (Whisper '{whisper_model_size}') completed in {time.time() - t_trans:.2f}s")
 
-        # 3. Analyze Audio with Gemini (Hybrid Analysis)
-        t_start = time.time()
+        # 3. Analyze Transcript with Gemini 2.5 Flash
+        # Title was already captured during download — no second yt-dlp call needed
+        t_analysis = time.time()
         video_title_for_ai = title or "Unknown Video"
-        if youtube_url and youtube_url != "Local Test File" and video_title_for_ai == "Unknown Video":
-            try:
-                with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
-                    info = ydl.extract_info(youtube_url, download=False)
-                    video_title_for_ai = info.get('title', "Project")
-            except: pass
 
-        analysis_result = analyze_viral_clips_from_audio(FULL_AUDIO, user_id=user_id, video_title=video_title_for_ai)
-        logger.info(f"   ✅ [PHASE 3] Gemini Viral Audio Analysis completed in {time.time() - t_start:.2f}s")
+        analysis_result = analyze_viral_clips_from_text(full_transcript, user_id=user_id, video_title=video_title_for_ai)
+        logger.info(f"   ✅ [PHASE 3] Gemini Viral Text Analysis completed in {time.time() - t_analysis:.2f}s")
         
         context = analysis_result.get("context", {})
         raw_clips = analysis_result.get("clips", [])
         is_podcast_global = context.get("is_podcast", False)
         logger.info(f"GEMINI CONTEXT — Theme: {context.get('tema_central', 'N/A')} | Format: {'Podcast' if is_podcast_global else 'Monologue'}")
 
-        if not analysis_result or not raw_clips:
-            raise ValueError("Gemini failed to identify any viral clips from audio.")
+        if not raw_clips:
+            raise ValueError("Gemini failed to identify any viral clips from transcription.")
             
-        # Optional: Cleanup analysis audio
+        # Cleanup analysis audio
         if os.path.exists(FULL_AUDIO): os.remove(FULL_AUDIO)
 
         # 4. Process Each Clip
@@ -1102,21 +1090,24 @@ if __name__ == "__main__":
             start_time = float(analysis.get('start', 0.0))
             end_time = float(analysis.get('end', start_time + 30.0))
             
-            # PHASE 3.5: Extract Clip first (to transcribe only this part)
+            # PHASE 3.5: Extract Clip first
             process_video_ffmpeg(video_file, V_OUT, start_time, end_time, A_OUT)
 
-            # PHASE 3.6: Local Precise Transcription (Whisper) for this clip only
-            t_trans = time.time()
-            clip_transcript = transcribe_audio_local(A_OUT, model_size="base") # Fast and precise
-            logger.info(f"      ✅ Local Clip Transcription completed in {time.time() - t_trans:.2f}s")
-
-            # Offset words for Remotion (starts at 0.0)
-            translated_words = clip_transcript['words']
-            for w in translated_words:
-                w['start'] = max(0.0, float(w['start']))
-                w['end'] = float(w['end'])
+            # PHASE 3.6: Slice Global Transcription (Fast and DRY)
+            t_slice = time.time()
+            # Filter words from full_transcript that fall between start_time and end_time
+            clip_words = []
+            for w in full_transcript.get('words', []):
+                if start_time <= w['start'] <= end_time:
+                    # Adjust timestamp to be relative to clip start
+                    new_w = w.copy()
+                    new_w['start'] = max(0.0, float(w['start']) - start_time)
+                    new_w['end'] = float(w['end']) - start_time
+                    clip_words.append(new_w)
             
-            logger.info(f"      ✅ Word timestamps adjusted to clip start")
+            logger.info(f"      ✅ Word slicing completed in {time.time() - t_slice:.2f}s (Total words: {len(clip_words)})")
+            
+            translated_words = clip_words
 
             
 
