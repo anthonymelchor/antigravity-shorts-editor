@@ -1240,10 +1240,17 @@ def do_render_queue(version_id, clip_indices, preferredLanguage='es', proj_title
                         # ... (Supabase code commented out)
                         '''
     
-                    # 1. Save modified Transcript to Remotion src
+                    # 1. Save Isolated Transcript for this specific render instance
+                    props_filename = f"props_{version_id}_{idx}.json"
+                    props_path = os.path.join(REMOTION_DIR, props_filename)
+                    with open(props_path, "w", encoding="utf-8") as f:
+                        json.dump({"transcript": clip_data, "preferredLanguage": preferredLanguage}, f, ensure_ascii=False, indent=2)
+                    
+                    # Also keep the shared file updated for backward compatibility/legacy Studio watchers
+                    # though 'props' will take priority in modern Root.tsx
                     with open(os.path.join(REMOTION_DIR, "src", "transcript_data.json"), "w", encoding="utf-8") as f:
                         json.dump(clip_data, f, ensure_ascii=False, indent=2)
-                    
+
                     v_name = clip_data.get("video_url")
                     a_name = clip_data.get("audio_url")
     
@@ -1253,6 +1260,7 @@ def do_render_queue(version_id, clip_indices, preferredLanguage='es', proj_title
                         render_state.status = "failed"
                         render_state.error = msg
                         log_file.write(f"[RENDER] ERROR: {msg}\n")
+                        if os.path.exists(props_path): os.remove(props_path)
                         continue
     
                     # 2. Media to Remotion public
@@ -1270,13 +1278,15 @@ def do_render_queue(version_id, clip_indices, preferredLanguage='es', proj_title
     
                     render_state.message = f"Building Clip #{idx+1}..."
                     render_state.progress = 20
-                    log_file.write(f"[RENDER] Running Remotion build for Clip #{idx+1}...\n")
+                    log_file.write(f"[RENDER] Running Remotion build for Clip #{idx+1} (Using isolated props: {props_filename})...\n")
                     log_file.flush()
                     
-                    # Using npx remotion render directly for better control + concurrency limit for Windows stability
-                    # Limiting to 4 instances prevents disk/CPU contention that often slows down Masive Rendering.
+                    # Using isolated props file to prevent race conditions (Totalmente Diferente BUG)
+                    render_cmd = ["npx", "remotion", "render", "src/index.ts", "ShortVideo", "out.mp4", 
+                                  f"--props={props_filename}", "--concurrency=4", "--force"]
+                    
                     process = subprocess.Popen(
-                        ["npx", "remotion", "render", "src/index.ts", "ShortVideo", "out.mp4", f"--concurrency=4", "--force"],
+                        render_cmd,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                         cwd=REMOTION_DIR, shell=True
                     )
@@ -1296,16 +1306,19 @@ def do_render_queue(version_id, clip_indices, preferredLanguage='es', proj_title
                             has_started_rendering = True
                             
                         if has_started_rendering:
-                            # Try to extract exact percentage from Remotion output e.g. "12/100 frames (12%)"
                             m = re.search(r"\((\d+)%\)", line)
                             if m:
                                 p = int(m.group(1))
-                                render_state.progress = 50 + int(p / 2) # map 2nd half of overall progress to actual encoding
+                                render_state.progress = 50 + int(p / 2)
                         
-                        # Still print to console for server visibility, but NOT to log_file
                         print(f"[Remotion-Internal] {line.strip()}")
                     
                     process.wait()
+                    
+                    # ALWAYS cleanup temporary props file
+                    if os.path.exists(props_path):
+                        try: os.remove(props_path)
+                        except: pass
                     
                     # Remove from tracking
                     with processes_lock:

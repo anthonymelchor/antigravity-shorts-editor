@@ -177,9 +177,152 @@ def transcribe_audio_local(video_path, model_size="base"):
 
 def transcribe_audio(video_path, model_size="base"):
     """
-    Transcribes audio EXCLUSIVELY using local faster-whisper.
+    Transcripción MULTIMODAL optimizada (Picard + Official Google Docs).
+    Usa Gemini 3.1 Flash-Lite con esquema de respuesta estricto y resolución baja.
     """
-    return transcribe_audio_local(video_path, model_size)
+    logger.info(f"=== INICIANDO TRANSCRIPCIÓN MULTIMODAL GEMINI (Fallback a Whisper) ===")
+    
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY no configurada.")
+        
+    client = genai.Client(api_key=api_key)
+    
+    # 1. Subida del archivo (Video completo para usar OCR + Audio)
+    logger.info(f"Subiendo archivo a Gemini... {os.path.basename(video_path)}")
+    video_file = client.files.upload(file=video_path)
+    
+    # Espera activa del procesamiento
+    while video_file.state == "PROCESSING":
+        time.sleep(5)
+        video_file = client.files.get(name=video_file.name)
+        
+    if video_file.state == "FAILED":
+        raise RuntimeError(f"Fallo en carga de video: {video_file.error}")
+
+    # 2. Definición del Esquema (Siguiendo la documentación oficial)
+    response_schema = types.Schema(
+        type=types.Type.OBJECT,
+        required=["segments"],
+        properties={
+            "segments": types.Schema(
+                type=types.Type.ARRAY,
+                items=types.Schema(
+                    type=types.Type.OBJECT,
+                    required=["timestamp", "content", "voice_id"],
+                    properties={
+                        "timestamp": types.Schema(type=types.Type.STRING, description="Formato MM:SS"),
+                        "content": types.Schema(type=types.Type.STRING, description="Texto íntegro hablado"),
+                        "voice_id": types.Schema(type=types.Type.INTEGER, description="ID único para cada voz detectada"),
+                        "speaker": types.Schema(type=types.Type.STRING, description="Nombre si aparece en pantalla"),
+                    }
+                )
+            )
+        }
+    )
+
+    prompt = """
+    Actúa como un experto traductor y transcriptor multimodal.
+    1. IDIOMA: Si el audio es en INGLÉS, tradúcelo fielmente al ESPAÑOL. Si el audio ya es en ESPAÑOL, corrígelo ortográficamente pero mantén el contenido original.
+    2. FIDELIDAD: Genera una transcripción íntegra (verbatim). NO resumas ni omitas partes. Mantén el tono y estilo del hablante.
+    3. OCR: Usa la información visual (texto en pantalla) para identificar nombres de speakers si aparecen.
+    4. DIARIZACIÓN: Asigna un 'voice_id' consistente (1, 2, 3...) a la misma persona en todo el video.
+    5. TIMESTAMPS: Proporciona timestamps exactos por cada segmento en formato MM:SS.
+    """
+
+    try:
+        logger.info("Solicitando generación de contenido (MEDIA_RESOLUTION_LOW)...")
+        response = client.models.generate_content(
+            model='gemini-3.1-flash-lite-preview',
+            contents=[prompt, video_file],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=response_schema,
+                media_resolution="MEDIA_RESOLUTION_LOW"
+            )
+        )
+        
+        # Limpieza (borrar archivo de la nube inmediatamente para no ocupar espacio)
+        client.files.delete(name=video_file.name)
+
+        if not response or not response.text:
+            raise RuntimeError("Respuesta de Gemini vacía.")
+
+        data = json.loads(response.text)
+        segments_raw = data.get("segments", [])
+
+        if not segments_raw:
+            logger.warning("No se extrajeron segmentos de la respuesta de Gemini.")
+            raise RuntimeError("Gemini no devolvió segmentos válidos.")
+
+        # 3. Procesamiento y adaptación para el Pipeline (Word-level interpolation)
+        words = []
+        segments_data = []
+        full_text = ""
+
+        def ts_to_sec(ts):
+            try:
+                p = ts.split(':')
+                if len(p) == 2: return int(p[0])*60 + float(p[1])
+                if len(p) == 3: return int(p[0])*3600 + int(p[1])*60 + float(p[2])
+            except: pass
+            return 0.0
+
+        for i, s in enumerate(segments_raw):
+            start_s = ts_to_sec(s.get('timestamp', '00:00'))
+            
+            # Estimamos duración mirando el siguiente segmento
+            if i < len(segments_raw) - 1:
+                end_s = ts_to_sec(segments_raw[i+1].get('timestamp', '00:00'))
+            else:
+                end_s = start_s + 5.0 # Margen final si es el último
+                
+            text = s.get('content', '').strip()
+            if not text: continue
+            
+            full_text += text + " "
+            
+            # Interpolación necesaria para el resto de herramientas de edición (zooms/icons)
+            raw_words = text.split()
+            seg_words = []
+            if raw_words:
+                dur = max(0.1, end_s - start_s)
+                w_dur = dur / len(raw_words)
+                for j, w in enumerate(raw_words):
+                    w_obj = {
+                        "word": w.strip(),
+                        "start": start_s + (j * w_dur),
+                        "end": start_s + ((j + 1) * w_dur)
+                    }
+                    words.append(w_obj)
+                    seg_words.append(w_obj)
+            
+            segments_data.append({
+                "text": text,
+                "start": start_s,
+                "end": end_s,
+                "words": seg_words,
+                "voice": s.get("voice_id", 0),
+                "speaker": s.get("speaker", "Unknown")
+            })
+
+        logger.info(f"Transcripción finalizada: {len(segments_data)} segmentos procesados.")
+        return {
+            "text": full_text.strip(),
+            "words": words,
+            "segments": segments_data,
+            "language": "es"
+        }
+
+    except Exception as e:
+        logger.error(f"FALLO EN TRANSCRIPCIÓN GEMINI: {str(e)}")
+        logger.info("⚠️ Activando fallback a Whisper Local...")
+        try:
+            return transcribe_audio_local(video_path, model_size=model_size)
+        except Exception as local_e:
+            logger.error(f"FALLO CRÍTICO EN WHISPER LOCAL: {str(local_e)}")
+            raise local_e
+
 
 def search_pexels_videos(query):
     """Searches Pexels for a video based on query and returns the best URL."""
@@ -1289,37 +1432,10 @@ if __name__ == "__main__":
                         "end": w['end'] - start_time
                     })
             
-            # 3.7 Extract Spanish Translation exactly for this clip using Gemini (Local Context + Short Segment Timestamps)
-            t_trans = time.time()
-            
-            clip_segments = []
-            for seg in transcript.get("segments", []):
-                # Verificar traslape con los tiempos del clip actual
-                if seg["end"] > start_time and seg["start"] < end_time:
-                    c_start = max(0.0, seg["start"] - start_time)
-                    c_end = seg["end"] - start_time
-                    # Palabras que cayeron en este micro-segmento
-                    seg_words = [w for w in adjusted_words if w['start'] >= c_start and w['end'] <= c_end]
-                    
-                    clip_segments.append({
-                        "text": seg["text"].strip(),
-                        "start": c_start,
-                        "end": c_end,
-                        "words": seg_words
-                    })
-            
-            if clip_segments:
-                try:
-                    translated_words = translate_full_transcript_global(clip_segments, source_lang=transcript.get("language", "en"))
-                    if not translated_words:
-                        translated_words = adjusted_words
-                except Exception as e:
-                    logger.error(f"      ❌ Local Clip Translation failed: {e}. Using original words.")
-                    translated_words = adjusted_words
-            else:
-                translated_words = adjusted_words
-                
-            logger.info(f"      ✅ Clip Contextual Translation completed in {time.time() - t_trans:.2f}s")
+            # 3.7 Usar las palabras ya transcritas y ajustadas (Sin re-llamada a Gemini por clip)
+            translated_words = adjusted_words
+            logger.info(f"      ✅ Usando transcripción global para el clip (Sin llamadas extra)")
+
             
             # 3.8 FIRST: Crop and Cut the physical clip (Lossless)
             t_clip = time.time()
