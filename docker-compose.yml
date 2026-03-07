@@ -31,7 +31,7 @@ services:
       dockerfile: Dockerfile.frontend
     container_name: rocoto-frontend
     ports:
-      - "3000:3000"
+      - "3005:3000"
     volumes:
       - ./frontend:/app
       - /app/node_modules # Prevenir que el node_modules local se pase al contenedor
