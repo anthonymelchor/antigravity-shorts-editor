@@ -74,24 +74,24 @@ def get_ducking_filter(words, duck_volume=0.1, fade_ms=200):
     
     return f"volume='if({condition_str}, {duck_volume}, 1.0)':eval=frame"
 
-def mix_audio_with_ducking(voice_path, music_path, output_path, words, bg_volume=0.4):
+def mix_audio_with_ducking(voice_path, music_path, output_path, words=None, bg_volume=0.06):
     """
-    Mixes voice and music using FFmpeg with automatic ducking based on word timestamps.
-    Uses -filter_complex_script (temp file) instead of inline -filter_complex to avoid
-    Windows shell quoting bugs. 100% cross-platform: Windows dev + Ubuntu prod.
+    Mixes voice and music using FFmpeg with a CONSTANT, homogeneous background level.
+    Removed dynamic ducking as per user request to mimic standard CapCut editing.
+    Uses -filter_complex_script (temp file) to avoid Windows shell quoting bugs.
     """
     import tempfile
-    logger.info(f"Mixing audio with ducking: {voice_path} + {music_path} -> {output_path}")
+    logger.info(f"Mixing audio with static background volume: {voice_path} + {music_path} -> {output_path}")
 
-    duck_filter = get_ducking_filter(words, duck_volume=0.1)
     offset = random.randint(0, 30)
 
+    # Simple static volume filter for the background music track
     filter_complex = (
-        f"[1:a]{duck_filter},volume={bg_volume}[bg];"
+        f"[1:a]volume={bg_volume}[bg];"
         f"[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[a]"
     )
 
-    # Write filter to a temp file — bypasses ALL shell quoting issues on Windows and Linux
+    # Write filter to a temp file — bypasses ALL shell quoting issues
     filter_script_path = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tmp:

@@ -1119,25 +1119,17 @@ if __name__ == "__main__":
             # PHASE 3.5: Extract Clip first
             process_video_ffmpeg(video_file, V_OUT, start_time, end_time, A_OUT)
 
-            # PHASE 3.55: Mix Background Music with Auto-Ducking (if available)
+            # PHASE 3.55: Mix Background Music with Static Volume (if available)
             if selected_music_path:
-                logger.info(f"      🎵 Mixing music '{os.path.basename(selected_music_path)}' with auto-ducking...")
-                # We pass clip_words at this stage — they will be computed right after,
-                # so we use the full_transcript words offset-adjusted for the clip window
-                _clip_words_for_duck = [
-                    {"start": max(0.0, float(w['start']) - start_time), "end": float(w['end']) - start_time}
-                    for w in full_transcript.get('words', [])
-                    if start_time <= w['start'] <= end_time
-                ]
+                logger.info(f"      🎵 Mixing music '{os.path.basename(selected_music_path)}' with static background volume...")
                 success = audio_processor.mix_audio_with_ducking(
                     voice_path=A_OUT,
                     music_path=selected_music_path,
                     output_path=A_OUT,
-                    words=_clip_words_for_duck,
-                    bg_volume=0.35
+                    bg_volume=0.06
                 )
                 if success:
-                    logger.info(f"      ✅ Music mix with ducking applied successfully")
+                    logger.info(f"      ✅ Music mix applied successfully")
                 else:
                     logger.warning(f"      ⚠️ Music mixing failed, keeping original clean audio")
 
