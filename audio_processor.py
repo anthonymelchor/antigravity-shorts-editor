@@ -42,16 +42,23 @@ def get_ducking_filter(words, duck_volume=0.1, fade_ms=200):
         return "volume=1.0"
         
     # Simplify words to active intervals (speech periods)
-    # We add a small buffer and combine overlapping intervals
+    # We add a larger buffer (0.5s) to merge close words and prevent music pumping.
     intervals = []
     for w in words:
-        start = max(0, float(w['start']) - 0.1)
-        end = float(w['end']) + 0.1
+        start = max(0, float(w['start']) - 0.5)
+        end = float(w['end']) + 0.5
         if not intervals or start > intervals[-1][1]:
             intervals.append([start, end])
         else:
             intervals[-1][1] = max(intervals[-1][1], end)
             
+    # Safeguard against FFmpeg expression complexity limit (returns AVERROR(EINVAL))
+    if len(intervals) > 40:
+        logger.warning(f"Audio has {len(intervals)} intervals. Condensing to prevent FFmpeg crash.")
+        global_start = intervals[0][0]
+        global_end = intervals[-1][1]
+        intervals = [[global_start, global_end]]
+
     # Build the 'if' condition string
     # volume='if(between(t,s1,e1)+between(t,s2,e2), duck_vol, 1.0)'
     conditions = []
