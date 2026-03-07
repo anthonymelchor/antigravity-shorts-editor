@@ -50,6 +50,8 @@ remotion-app/src/transcript_data.json
 *.log
 pipeline.log
 *.txt
+!requirements.txt
+!models.txt
 !README.md
 
 # Python
