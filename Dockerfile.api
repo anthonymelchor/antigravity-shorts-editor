@@ -1,0 +1,55 @@
+# 🐳 Dockerfile para Backend & Render Engine (FastAPI + Remotion)
+FROM python:3.10-slim
+
+# Evitar prompts de apt y configurar zona horaria
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# 1. Instalar dependencias del sistema (FFmpeg, Gráficos para MediaPipe y Chromium para Remotion)
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    ffmpeg \
+    build-essential \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libnss3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libasound2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Instalar Node.js (Necesario para ejecutar Remotion CLI desde Python)
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs
+
+# 3. Configurar Directorio de Trabajo
+WORKDIR /app
+
+# 4. Instalar dependencias de Python
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 5. Instalar dependencias de Remotion y Chromium
+COPY remotion-app/package*.json ./remotion-app/
+RUN cd remotion-app && npm install
+RUN cd remotion-app && npx remotion browser install
+
+# 6. Copiar el código del Backend y Discovery
+COPY . .
+
+# 7. Exponer puerto del API
+EXPOSE 8000
+
+# 8. Comando para iniciar el servidor
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]

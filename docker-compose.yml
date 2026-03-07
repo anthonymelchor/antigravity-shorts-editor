@@ -1,0 +1,50 @@
+# 🐳 Orquestación del Ecosistema Antigravity con Docker Compose
+version: '3.8'
+
+services:
+  # 🚀 Backend Principal (API + Renderizado + Discovery)
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: rocoto-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - /app/venv # Prevenir que el venv local se pase al contenedor
+      - /app/node_modules # Prevenir que el node_modules local se pase al contenedor
+    env_file:
+      - .env
+    restart: unless-stopped
+    # Nota: Si tu VPS tiene GPU NVIDIA, descomenta estas líneas para habilitarla:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # 🎨 Frontend (Dashboard y Neural Preview Engine)
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: rocoto-frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules # Prevenir que el node_modules local se pase al contenedor
+    env_file:
+      - frontend/.env.local
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - api
+    restart: unless-stopped
+
+networks:
+  default:
+    name: antigravity-network

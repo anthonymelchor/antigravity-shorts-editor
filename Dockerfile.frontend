@@ -1,0 +1,20 @@
+# 🐳 Dockerfile para el Frontend (Next.js)
+FROM node:20-slim AS base
+
+WORKDIR /app
+
+# 1. Instalar dependencias
+COPY frontend/package*.json ./
+RUN npm install
+
+# 2. Copiar el código
+COPY frontend/. .
+
+# 3. Construir para producción (opcional pero recomendado)
+# RUN npm run build
+
+# 4. Exponer puerto del Frontend
+EXPOSE 3000
+
+# 5. Comando para iniciar el Frontend
+CMD ["npm", "run", "dev"]
