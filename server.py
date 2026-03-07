@@ -1284,13 +1284,16 @@ def do_render_queue(version_id, clip_indices, preferredLanguage='es', proj_title
                     log_file.flush()
                     
                     # Using isolated props file to prevent race conditions (Totalmente Diferente BUG)
-                    render_cmd = ["npx", "remotion", "render", "src/index.ts", "ShortVideo", "out.mp4", 
+                    render_cmd = ["npx", "remotion", "render", "src/index.ts", "ShortVideo", "out.mp4",
                                   f"--props={props_filename}", "--concurrency=4", "--force"]
-                    
+
+                    # shell=True required on Windows for npx to resolve correctly
+                    # shell=False on Linux/Ubuntu for proper process tree and SIGTERM support
+                    _use_shell = sys.platform == "win32"
                     process = subprocess.Popen(
                         render_cmd,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                        cwd=REMOTION_DIR, shell=True
+                        cwd=REMOTION_DIR, shell=_use_shell
                     )
                     
                     # Track for cancellation

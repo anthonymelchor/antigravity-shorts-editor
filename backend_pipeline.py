@@ -42,9 +42,14 @@ logger = logging.getLogger(__name__)
 
 # Ensure FFmpeg is available in PATH
 if os.name == "nt":
-    ffmpeg_bin = r"C:\Users\MELCHOR\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin"
-    if ffmpeg_bin not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = ffmpeg_bin + os.pathsep + os.environ.get("PATH", "")
+    # Windows-only: add local WinGet FFmpeg to PATH if ffmpeg isn't already accessible
+    import shutil as _shutil
+    if not _shutil.which("ffmpeg"):
+        _ffmpeg_bin = r"C:\Users\MELCHOR\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin"
+        if os.path.isdir(_ffmpeg_bin):
+            os.environ["PATH"] = _ffmpeg_bin + os.pathsep + os.environ.get("PATH", "")
+# On Linux/Ubuntu: ffmpeg is expected to be installed system-wide (apt install ffmpeg)
+
 
 def download_video(url, output_path):
     """Downloads video and returns (file_path, video_title) tuple."""

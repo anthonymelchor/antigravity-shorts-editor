@@ -68,44 +68,52 @@ def get_ducking_filter(words, duck_volume=0.1, fade_ms=200):
 def mix_audio_with_ducking(voice_path, music_path, output_path, words, bg_volume=0.4):
     """
     Mixes voice and music using FFmpeg with automatic ducking based on word timestamps.
+    Uses -filter_complex_script (temp file) instead of inline -filter_complex to avoid
+    Windows shell quoting bugs. 100% cross-platform: Windows dev + Ubuntu prod.
     """
+    import tempfile
     logger.info(f"Mixing audio with ducking: {voice_path} + {music_path} -> {output_path}")
-    
-    # 1. Get the ducking filter expression
-    duck_filter = get_ducking_filter(words, duck_volume=0.1) # 10% volume during speech
-    
-    # 2. Pick a random start offset for the music to avoid repetition
-    # We need to know music duration first (optional but better)
-    # For now, we use -stream_loop -1 to ensure it never runs out.
-    
-    # Construction:
-    # -i voice
-    # -stream_loop -1 -i music
-    # [1:a] <duck_filter>, volume=<bg_volume> [bg];
-    # [0:a][bg] amix=inputs=2:duration=first:dropout_transition=0 [out]
-    
-    # Random offset (e.g. up to 30s)
+
+    duck_filter = get_ducking_filter(words, duck_volume=0.1)
     offset = random.randint(0, 30)
-    
-    command = [
-        "ffmpeg", "-y",
-        "-i", voice_path,
-        "-ss", str(offset),
-        "-stream_loop", "-1", "-i", music_path,
-        "-filter_complex", 
+
+    filter_complex = (
         f"[1:a]{duck_filter},volume={bg_volume}[bg];"
-        f"[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[a]",
-        "-map", "[a]",
-        "-c:a", "pcm_s16le", # Output as WAV for Remotion
-        "-ar", "44100",
-        "-ac", "2",
-        output_path
-    ]
-    
+        f"[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[a]"
+    )
+
+    # Write filter to a temp file — bypasses ALL shell quoting issues on Windows and Linux
+    filter_script_path = None
     try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as tmp:
+            tmp.write(filter_complex)
+            filter_script_path = tmp.name
+    except Exception as e:
+        logger.error(f"Failed to write FFmpeg filter script: {e}")
+        return False
+
+    try:
+        command = [
+            "ffmpeg", "-y",
+            "-i", voice_path,
+            "-ss", str(offset), "-stream_loop", "-1", "-i", music_path,
+            "-filter_complex_script", filter_script_path,
+            "-map", "[a]",
+            "-c:a", "pcm_s16le",
+            "-ar", "44100",
+            "-ac", "2",
+            output_path
+        ]
         subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         logger.info("Audio mixing successful.")
         return True
     except Exception as e:
         logger.error(f"FFmpeg mixing failed: {str(e)}")
         return False
+    finally:
+        if filter_script_path:
+            try:
+                os.unlink(filter_script_path)
+            except Exception:
+                pass
+
