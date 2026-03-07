@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y \
     git \
     ffmpeg \
     build-essential \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     libnss3 \
     libatk1.0-0 \

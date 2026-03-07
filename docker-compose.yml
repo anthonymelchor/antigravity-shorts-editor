@@ -1,6 +1,4 @@
 # 🐳 Orquestación del Ecosistema Antigravity con Docker Compose
-version: '3.8'
-
 services:
   # 🚀 Backend Principal (API + Renderizado + Discovery)
   api:
