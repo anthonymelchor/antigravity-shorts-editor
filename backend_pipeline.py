@@ -62,6 +62,10 @@ def download_video(url, output_path):
             'outtmpl': output_path,
             'overwrites': True,
         }
+        
+        # Anti-bot server protection: use cookies if provided
+        if os.path.exists("cookies.txt"):
+            ydl_opts['cookiefile'] = "cookies.txt"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             video_title = info.get('title') if info else None
