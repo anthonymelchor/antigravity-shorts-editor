@@ -540,24 +540,39 @@ def run_pipeline(url: str, version: int, niche: Optional[str] = None, enable_bg_
                             log_file.write(line)
                             log_file.flush()
                         
-                        # Track progress via logs (Standard 5 - Observability)
+                        # Track progress via logs (Standard 5 - Observability & Smooth Progress Bar)
                         if "Downloading video" in line:
                             state.status = "downloading"
                             state.message = "Descargando video de YouTube..."
-                            state.progress = 10
-                        elif "Transcribing" in line:
+                            state.progress = 5
+                        elif "[PHASE 1] Download completed" in line or "Video downloaded to" in line:
+                            state.progress = 20
+                        elif "Extracting audio" in line:
+                            state.progress = 25
+                        elif "Loading Whisper model" in line:
                             state.status = "transcribing"
-                            state.message = "Transcribiendo audio (IA Whisper)..."
+                            state.message = "Cargando Motor IA Acústico..."
                             state.progress = 30
-                        elif "Analyzing transcript" in line:
+                        elif "Transcribing" in line or "Processing audio with duration" in line:
+                            state.status = "transcribing"
+                            state.message = "Transcribiendo audio inteligentemente..."
+                            state.progress = 40
+                        elif "[PHASE 2] Full Transcription" in line:
+                            state.progress = 50
+                        elif "Pidiendo a Gemini que analice el texto" in line:
                             state.status = "analyzing"
-                            state.message = "Gemini AI seleccionando momentos..."
+                            state.message = "Gemini seleccionando momentos virales..."
                             state.progress = 60
+                        elif "[PHASE 3] Gemini Viral Text Analysis" in line:
+                            state.progress = 75
+                        elif "Processing Clip #" in line:
+                            state.status = "framing"
+                            state.message = "Rastreo y Edición Automática de Clips..."
+                            state.progress = min(98, state.progress + 3) # Incremental smoothly up to 98%
                         elif "Starting Local HIGH-PRECISION Framing" in line:
                             state.status = "framing"
-                            state.message = "Local AI Tracking (Alta Precisión)..."
                             state.progress = 80
-                        elif "Backend processing pipeline complete" in line:
+                        elif "Backend processing pipeline complete" in line or "PIPELINE FINISHED SUCCESSFULY" in line:
                             state.status = "completed"
                             state.message = "Procesamiento completado!"
                             state.progress = 100
@@ -1290,9 +1305,11 @@ def do_render_queue(version_id, clip_indices, preferredLanguage='es', proj_title
                     # shell=True required on Windows for npx to resolve correctly
                     # shell=False on Linux/Ubuntu for proper process tree and SIGTERM support
                     _use_shell = sys.platform == "win32"
+                    
+                    # NOTE: We remove text=True and use raw bytes to intercept \r (carriage returns) properly!
                     process = subprocess.Popen(
                         render_cmd,
-                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         cwd=REMOTION_DIR, shell=_use_shell
                     )
                     
@@ -1302,21 +1319,40 @@ def do_render_queue(version_id, clip_indices, preferredLanguage='es', proj_title
                     
                     import re
                     has_started_rendering = False
-                    for line in process.stdout:
-                        if "Rendering" in line and not has_started_rendering:
-                            render_state.progress = 50
-                            render_state.message = f"Rendering Clip #{idx+1}..."
-                            log_file.write(f"[RENDER] Final rendering phase started for Clip #{idx+1}...\n")
-                            log_file.flush()
-                            has_started_rendering = True
-                            
-                        if has_started_rendering:
-                            m = re.search(r"\((\d+)%\)", line)
-                            if m:
-                                p = int(m.group(1))
-                                render_state.progress = 50 + int(p / 2)
+                    buf = bytearray()
+                    
+                    while True:
+                        char = process.stdout.read(1)
+                        if not char:
+                            break
                         
-                        print(f"[Remotion-Internal] {line.strip()}")
+                        buf.extend(char)
+                        if char in (b'\r', b'\n'):
+                            try:
+                                line = buf.decode('utf-8', errors='ignore').strip()
+                            except:
+                                line = ""
+                            buf.clear()
+                            
+                            if not line:
+                                continue
+                                
+                            if "Rendering video" in line and not has_started_rendering:
+                                render_state.progress = 50
+                                render_state.message = f"Rendering Clip #{idx+1}..."
+                                log_file.write(f"[RENDER] Final rendering phase started for Clip #{idx+1}...\n")
+                                log_file.flush()
+                                has_started_rendering = True
+                                
+                            if has_started_rendering:
+                                # Standard remotion output has forms like: "16x 1354/1354 (100%)" or "12x (45%)"
+                                m = re.search(r"\((\d+)%\)", line)
+                                if m:
+                                    p = int(m.group(1))
+                                    render_state.progress = 50 + int(p / 2)
+                            
+                            if char == b'\n':
+                                print(f"[Remotion-Internal] {line}")
                     
                     process.wait()
                     
