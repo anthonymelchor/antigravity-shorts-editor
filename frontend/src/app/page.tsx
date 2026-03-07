@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, memo } from 'react';
 import { Player, PlayerRef } from '@remotion/player';
 import { Main } from '../remotion/Composition';
 import {
@@ -36,6 +36,57 @@ import { createClientComponentClient } from '@supabase/auth-helpers-nextjs';
 import { useRouter } from 'next/navigation';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+
+const ClipPlayer = memo(({ clip, transcript, preferredLanguage, authToken, API_BASE }: any) => {
+    const inputProps = useMemo(() => ({
+        transcript: { ...transcript, ...clip },
+        isPlayer: true,
+        preferredLanguage,
+        apiBase: API_BASE,
+        version: transcript?.version,
+        token: authToken
+    }), [transcript?.version, clip.id, clip.start, clip.end, authToken, preferredLanguage]);
+
+    return (
+        <Player
+            component={Main}
+            durationInFrames={Math.ceil((clip.end - clip.start || 30) * 30)}
+            compositionWidth={1080} compositionHeight={1920} fps={30}
+            style={{ width: '100%', height: '100%', objectFit: 'contain' }} controls
+            bufferStateDelayInMilliseconds={1000}
+            renderLoading={() => <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-white text-[10px] animate-pulse">Buffering...</div>}
+            inputProps={inputProps}
+        />
+    );
+});
+
+const EditorPlayer = memo(({ transcript, selectedClipIdx, preferredLanguage, authToken, API_BASE, playerRef }: any) => {
+    const clip = transcript?.clips?.[selectedClipIdx];
+    const inputProps = useMemo(() => ({
+        transcript: { ...transcript, ...clip },
+        isPlayer: true,
+        preferredLanguage,
+        apiBase: API_BASE,
+        version: transcript?.version,
+        token: authToken
+    }), [transcript?.version, selectedClipIdx, authToken, preferredLanguage]);
+
+    return (
+        <Player
+            ref={playerRef}
+            component={Main}
+            durationInFrames={Math.ceil((clip?.duration || 30) * 30)}
+            compositionWidth={1080}
+            compositionHeight={1920}
+            fps={30}
+            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+            controls
+            bufferStateDelayInMilliseconds={1000}
+            autoPlay={true}
+            inputProps={inputProps}
+        />
+    );
+});
 
 export default function Home() {
     const [url, setUrl] = useState('');
@@ -179,38 +230,27 @@ export default function Home() {
             let timeSec = -1;
             let durationSec = 1;
 
-            // Source 1: actual <video> element (most reliable when Remotion uses video)
-            const videoEl = document.querySelector('video') as HTMLVideoElement | null;
-            if (videoEl && isFinite(videoEl.duration) && videoEl.duration > 0) {
-                timeSec = videoEl.currentTime;
-                durationSec = videoEl.duration;
-            }
+            if (view === 'editor') {
+                // In editor, try to find the player's video element first (more accurate)
+                const editorPlayer = document.querySelector('.editor-player-container');
+                const videoEl = editorPlayer?.querySelector('video') as HTMLVideoElement | null;
 
-            // Source 2: playerRef.getCurrentFrame() (works when Remotion renders frames as canvas)
-            if (timeSec < 0 && playerRef.current) {
-                try {
-                    const f = (playerRef.current as any).getCurrentFrame?.();
-                    if (typeof f === 'number') {
-                        timeSec = f / 30;
-                        durationSec = (transcript?.clips?.[selectedClipIdx]?.duration) || 30;
-                    }
-                } catch (_) { }
-            }
+                if (videoEl && isFinite(videoEl.duration) && videoEl.duration > 0) {
+                    timeSec = videoEl.currentTime;
+                    durationSec = videoEl.duration;
+                } else if (playerRef.current) {
+                    // Fallback to Player API
+                    try {
+                        const f = (playerRef.current as any).getCurrentFrame?.();
+                        if (typeof f === 'number') {
+                            timeSec = f / 30;
+                            durationSec = (transcript?.clips?.[selectedClipIdx]?.duration) || 30;
+                        }
+                    } catch (_) { }
+                }
 
-            if (timeSec >= 0 && Math.abs(timeSec - lastVal) > 0.01) {
-                lastVal = timeSec;
-
-                if (view === 'results') {
-                    // Results view: update DOM directly (no React re-render overhead)
-                    const pct = Math.min(100, (timeSec / durationSec) * 100);
-                    const lineEl = document.getElementById('rct-playhead-line');
-                    if (lineEl) (lineEl as HTMLElement).style.left = pct + '%';
-                    const labelEl = document.getElementById('rct-playhead-label');
-                    if (labelEl) (labelEl as HTMLElement).textContent = timeSec.toFixed(1) + 's';
-                    const inpEl = document.getElementById('rct-playhead-input') as HTMLInputElement | null;
-                    if (inpEl && document.activeElement !== inpEl) inpEl.value = timeSec.toFixed(2);
-                } else if (view === 'editor') {
-                    // Editor view: update DOM directly to avoid Remotion Player props remounts (fixes stutter loop)
+                if (timeSec >= 0 && Math.abs(timeSec - lastVal) > 0.01) {
+                    lastVal = timeSec;
                     const pct = Math.min(100, (timeSec / durationSec) * 100);
                     const edLine = document.getElementById('rct-editor-playhead-line');
                     if (edLine) (edLine as HTMLElement).style.left = pct + '%';
@@ -219,6 +259,9 @@ export default function Home() {
                     const edInp = document.getElementById('rct-editor-playhead-input') as HTMLInputElement | null;
                     if (edInp && document.activeElement !== edInp) edInp.value = timeSec.toFixed(3);
                 }
+            } else if (view === 'results') {
+                // In results view, we just let the native controls do their thing, 
+                // but we could track the active one if we had a specific global UI for it.
             }
 
             rafId = requestAnimationFrame(tick);
@@ -226,7 +269,7 @@ export default function Home() {
 
         rafId = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(rafId);
-    }, [view, transcript, selectedClipIdx]);
+    }, [view, transcript?.version, selectedClipIdx]);
 
     useEffect(() => {
         let interval: NodeJS.Timeout;
@@ -974,22 +1017,12 @@ export default function Home() {
                                     <div className="flex bg-[#050505] p-6 gap-8">
                                         <div className="w-[30%] min-w-[200px] flex justify-center items-start">
                                             <div className="w-[200px] aspect-[9/16] bg-black rounded-lg overflow-hidden shadow-2xl border border-white/10 relative">
-                                                <Player
-                                                    component={Main}
-                                                    durationInFrames={Math.ceil((clip.end - clip.start || 30) * 30)}
-                                                    compositionWidth={1080} compositionHeight={1920} fps={30}
-                                                    style={{ width: '100%', height: '100%', objectFit: 'contain' }} controls
-                                                    // PERFORMANCE FIXES FOR PREVIEW LOOP (STUTTERING)
-                                                    bufferStateDelayInMilliseconds={0}
-                                                    renderLoading={() => <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-white text-[10px] animate-pulse">Buffering...</div>}
-                                                    inputProps={{
-                                                        transcript: { ...transcript, ...clip },
-                                                        isPlayer: true,
-                                                        preferredLanguage,
-                                                        apiBase: API_BASE,
-                                                        version: transcript?.version,
-                                                        token: authToken
-                                                    }}
+                                                <ClipPlayer
+                                                    clip={clip}
+                                                    transcript={transcript}
+                                                    preferredLanguage={preferredLanguage}
+                                                    authToken={authToken}
+                                                    API_BASE={API_BASE}
                                                 />
                                             </div>
                                         </div>
@@ -1293,24 +1326,14 @@ export default function Home() {
             <div className="flex-1 flex overflow-hidden">
                 <div className="flex-1 flex flex-col bg-[#050505] overflow-hidden border-r border-white/5">
                     <div className="flex-1 flex items-center justify-center min-h-0 p-8">
-                        <div className="h-full aspect-[9/16] bg-black rounded-[2rem] overflow-hidden shadow-2xl border border-white/5 relative">
-                            <Player
-                                ref={playerRef}
-                                component={Main}
-                                durationInFrames={Math.ceil((transcript?.clips?.[selectedClipIdx]?.duration || 30) * 30)}
-                                compositionWidth={1080} compositionHeight={1920} fps={30}
-                                style={{ width: '100%', height: '100%' }} controls
-                                // PERFORMANCE FIXES FOR PREVIEW LOOP (STUTTERING)
-                                bufferStateDelayInMilliseconds={0}
-                                renderLoading={() => <div className="absolute inset-0 flex items-center justify-center bg-[#050505]/90 backdrop-blur-md text-white font-black text-xs uppercase tracking-[0.2em] animate-pulse">Cargando Frame...</div>}
-                                inputProps={{
-                                    transcript: { ...transcript, ...transcript?.clips?.[selectedClipIdx] },
-                                    isPlayer: true,
-                                    preferredLanguage,
-                                    apiBase: API_BASE,
-                                    version: transcript?.version,
-                                    token: authToken
-                                }}
+                        <div className="h-full aspect-[9/16] bg-black rounded-[2rem] overflow-hidden shadow-2xl border border-white/5 relative editor-player-container">
+                            <EditorPlayer
+                                transcript={transcript}
+                                selectedClipIdx={selectedClipIdx}
+                                preferredLanguage={preferredLanguage}
+                                authToken={authToken}
+                                API_BASE={API_BASE}
+                                playerRef={playerRef}
                             />
 
                             {/* Render Status Overlay/Indicator under player */}
