@@ -57,11 +57,13 @@ def download_video(url, output_path):
     try:
         video_title = None
         ydl_opts = {
-            # Safest fallback chain: mp4+m4a -> any video+audio -> best single file -> absolute best
-            'format': 'bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440]+bestaudio/best[height<=1440]/best',
+            # Simplest, most bulletproof fallback chain for formats
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'merge_output_format': 'mp4',
             'outtmpl': output_path,
             'overwrites': True,
+            # Bypasses the "Empty format list" bug on YouTube by spoofing reliable device clients
+            'extractor_args': {'youtube': {'player_client': ['web', 'ios', 'android']}},
         }
         
         # Anti-bot server protection: use cookies if provided
