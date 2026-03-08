@@ -4,6 +4,8 @@ FROM python:3.10-slim
 # Evitar prompts de apt y configurar zona horaria
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
+# Guarantee yt-dlp can find the Node.js JS runtime (prevents empty YouTube format lists)
+ENV PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/lib/nodejs/bin"
 
 # 1. Instalar dependencias del sistema (FFmpeg, Gráficos para MediaPipe y Chromium para Remotion)
 RUN apt-get update && apt-get install -y \
