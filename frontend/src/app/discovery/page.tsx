@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Search, Flame, Play, CheckCircle, Info, ArrowLeft, ExternalLink, Zap, Sparkles, RefreshCw, Check, Filter } from "lucide-react";
 import Link from "next/link";
 import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import { NewFeaturesNav } from "../../components/NewFeaturesNav";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
@@ -178,9 +179,12 @@ export default function DiscoveryPage() {
                 {/* Header */}
                 <div className="flex items-center justify-between mb-16 border-b border-white/5 pb-12">
                     <div>
-                        <Link href="/" className="inline-flex items-center text-[10px] font-black uppercase tracking-widest text-neutral-500 hover:text-white mb-6 transition-colors">
-                            <ArrowLeft className="w-4 h-4 mr-2" /> Volver al Motor
-                        </Link>
+                        <nav className="flex gap-6 text-[10px] font-black uppercase tracking-widest text-neutral-500 mb-6 transition-colors">
+                            <Link href="/" className="hover:text-white transition-colors flex items-center gap-2">
+                                Dashboard
+                            </Link>
+                            <NewFeaturesNav />
+                        </nav>
                         <h1 className="text-6xl font-black tracking-tighter uppercase">
                             Discovery Engine
                         </h1>

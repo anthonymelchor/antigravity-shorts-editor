@@ -35,6 +35,7 @@ import {
 import Link from 'next/link';
 import { createClientComponentClient } from '@supabase/auth-helpers-nextjs';
 import { useRouter } from 'next/navigation';
+import { NewFeaturesNav, DiscoveryLink } from '../components/NewFeaturesNav';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
@@ -1072,10 +1073,8 @@ export default function Home() {
                     <h1 className="text-2xl font-bold tracking-tighter uppercase">RocotoClip</h1>
                     <div className="h-4 w-px bg-white/10" />
                     <nav className="flex gap-6 text-[10px] font-black uppercase tracking-widest text-neutral-500">
-                        <Link href="/discovery" className="hover:text-white transition-colors flex items-center gap-2">
-                            <Sparkles className="w-3 h-3" />
-                            Discovery Engine
-                        </Link>
+                        <DiscoveryLink />
+                        <NewFeaturesNav />
                     </nav>
                 </div>
                 <button
@@ -1106,10 +1105,6 @@ export default function Home() {
 
                     <div className="flex items-center justify-between px-8 py-6 border-t border-white/5 bg-black/40 rounded-b-[2.3rem]">
                         <div className="flex gap-6 items-center">
-                            <Link href="/discovery" className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-neutral-500 hover:text-white transition-all cursor-pointer">
-                                <Sparkles className="w-4 h-4" /> Discovery
-                            </Link>
-                            <div className="h-4 w-px bg-white/5" />
                             <select
                                 value={selectedNiche}
                                 onChange={(e) => setSelectedNiche(e.target.value)}

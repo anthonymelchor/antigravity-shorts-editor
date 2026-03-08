@@ -56,16 +56,21 @@ def download_video(url, output_path):
     logger.info(f"Downloading video from {url}...")
     try:
         video_title = None
+        # Explicit ffmpeg location for yt-dlp to avoid 'format not available' errors due to merging failure
+        ffmpeg_bin = r"C:\Users\MELCHOR\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin"
+
         ydl_opts = {
-            'format': 'bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440]+bestaudio/best[height<=1440]',
+            'format': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]/best',
             'merge_output_format': 'mp4',
             'outtmpl': output_path,
             'overwrites': True,
+            'ffmpeg_location': ffmpeg_bin,
         }
         
-        # Anti-bot server protection: use cookies if provided
-        if os.path.exists("cookies.txt"):
-            ydl_opts['cookiefile'] = "cookies.txt"
+        # Remove cookies for now to avoid 'n challenge' bot-detection failures
+        # if os.path.exists("cookies.txt"):
+        #     ydl_opts['cookiefile'] = "cookies.txt"
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             video_title = info.get('title') if info else None
@@ -1126,7 +1131,7 @@ if __name__ == "__main__":
                     voice_path=A_OUT,
                     music_path=selected_music_path,
                     output_path=A_OUT,
-                    bg_volume=0.06
+                    bg_volume=0.03
                 )
                 if success:
                     logger.info(f"      ✅ Music mix applied successfully")

@@ -74,7 +74,7 @@ def get_ducking_filter(words, duck_volume=0.1, fade_ms=200):
     
     return f"volume='if({condition_str}, {duck_volume}, 1.0)':eval=frame"
 
-def mix_audio_with_ducking(voice_path, music_path, output_path, words=None, bg_volume=0.06):
+def mix_audio_with_ducking(voice_path, music_path, output_path, words=None, bg_volume=0.03):
     """
     Mixes voice and music using FFmpeg with a CONSTANT, homogeneous background level.
     Removed dynamic ducking as per user request to mimic standard CapCut editing.

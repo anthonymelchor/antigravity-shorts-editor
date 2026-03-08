@@ -34,7 +34,13 @@ if gemini_key:
 else:
     print("[Debug-Server] ADVERTENCIA: GEMINI_API_KEY no detectada.")
 
+from new_functionalities.video_downloader_api import router as downloader_router
+
 app = FastAPI()
+
+# Register new functionalities
+app.include_router(downloader_router)
+
 
 @app.get("/")
 async def health_check():
