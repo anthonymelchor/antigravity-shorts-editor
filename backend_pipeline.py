@@ -71,9 +71,6 @@ def download_video(url, output_path):
             'merge_output_format': 'mp4',
             'outtmpl': output_path,
             'overwrites': True,
-            # tv_embedded bypasses YouTube's PO Token requirement that ios/android now enforce.
-            # Tested locally: successfully downloads videos that ios+android alone cannot.
-            'extractor_args': {'youtube': {'player_client': ['tv_embedded', 'web']}},
         }
         
         # Anti-bot server protection: use cookies if provided
