@@ -1,9 +1,12 @@
 import { Composition } from 'remotion';
 import { Main } from './Composition';
 import './style.css';
-import transcriptData from './transcript_data.json';
+import transcriptDataJson from './transcript_data.json';
 
 export const RemotionRoot: React.FC = () => {
+    // Cast to any to prevent Next.js build from failing on placeholder files
+    const transcriptData: any = transcriptDataJson;
+
     // Calculate duration based on the last word's end time
     const fps = 30;
     const words = transcriptData.words || [];
