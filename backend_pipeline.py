@@ -58,7 +58,8 @@ def download_video(url, output_path):
         video_title = None
         ydl_opts = {
             # Simplest, most bulletproof fallback chain for formats (let FFmpeg handle the MP4 merging)
-            'format': 'bestvideo+bestaudio/best',
+            # We strictly limit height to 1440p to prevent 4K/8K from crashing the VPS RAM / Framing
+            'format': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]/best',
             'merge_output_format': 'mp4',
             'outtmpl': output_path,
             'overwrites': True,
