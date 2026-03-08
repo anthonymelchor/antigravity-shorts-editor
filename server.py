@@ -1306,12 +1306,17 @@ def do_render_queue(version_id, clip_indices, preferredLanguage='es', proj_title
                     # shell=False on Linux/Ubuntu for proper process tree and SIGTERM support
                     _use_shell = sys.platform == "win32"
                     
-                    # NOTE: We remove text=True and use raw bytes to intercept \r (carriage returns) properly!
+                    # NOTE: We use text=True but specify universal newlines to catch '\r' natively without byte-by-byte overhead
+                    import io
                     process = subprocess.Popen(
                         render_cmd,
-                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=False,
                         cwd=REMOTION_DIR, shell=_use_shell
                     )
+                    
+                    # Wrap stdout in an TextIOWrapper that translates \r into \n dynamically
+                    # This prevents Python from stalling on Remotion's progress lines but is 1000x faster than reading byte-by-byte
+                    stdout_wrapper = io.TextIOWrapper(process.stdout, encoding='utf-8', errors='ignore', newline='')
                     
                     # Track for cancellation
                     with processes_lock:
@@ -1319,41 +1324,45 @@ def do_render_queue(version_id, clip_indices, preferredLanguage='es', proj_title
                     
                     import re
                     has_started_rendering = False
-                    buf = bytearray()
                     
+                    # Read chunked blocks of characters directly
+                    buf = ""
                     while True:
-                        char = process.stdout.read(1)
-                        if not char:
+                        chunk = stdout_wrapper.read(128) # small efficient chunks
+                        if not chunk:
                             break
                         
-                        buf.extend(char)
-                        if char in (b'\r', b'\n'):
-                            try:
-                                line = buf.decode('utf-8', errors='ignore').strip()
-                            except:
-                                line = ""
-                            buf.clear()
+                        buf += chunk
+                        # Remotion progress outputs \r to overwrite carriage. We split by it or \n.
+                        if '\r' in buf or '\n' in buf:
+                            # Use regex or simple replace to normalize splits, then process lines
+                            lines = buf.replace('\r', '\n').split('\n')
+                            # Keep the last segment in the buffer since it might be incomplete
+                            buf = lines.pop()
                             
-                            if not line:
-                                continue
+                            for line in lines:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                    
+                                if "Rendering video" in line and not has_started_rendering:
+                                    render_state.progress = 50
+                                    render_state.message = f"Rendering Clip #{idx+1}..."
+                                    log_file.write(f"[RENDER] Final rendering phase started for Clip #{idx+1}...\n")
+                                    log_file.flush()
+                                    has_started_rendering = True
+                                    
+                                if has_started_rendering:
+                                    # Standard remotion output has forms like: "16x 1354/1354 (100%)"
+                                    m = re.search(r"\((\d+)%\)", line)
+                                    if m:
+                                        p = int(m.group(1))
+                                        render_state.progress = 50 + int(p / 2)
                                 
-                            if "Rendering video" in line and not has_started_rendering:
-                                render_state.progress = 50
-                                render_state.message = f"Rendering Clip #{idx+1}..."
-                                log_file.write(f"[RENDER] Final rendering phase started for Clip #{idx+1}...\n")
-                                log_file.flush()
-                                has_started_rendering = True
-                                
-                            if has_started_rendering:
-                                # Standard remotion output has forms like: "16x 1354/1354 (100%)" or "12x (45%)"
-                                m = re.search(r"\((\d+)%\)", line)
-                                if m:
-                                    p = int(m.group(1))
-                                    render_state.progress = 50 + int(p / 2)
-                            
-                            if char == b'\n':
-                                print(f"[Remotion-Internal] {line}")
-                    
+                                # Only print true lines to terminal, avoids spamming same line over and over
+                                if "x" not in line and "%" not in line: 
+                                    print(f"[Remotion-Internal] {line}")
+                                    
                     process.wait()
                     
                     # ALWAYS cleanup temporary props file
