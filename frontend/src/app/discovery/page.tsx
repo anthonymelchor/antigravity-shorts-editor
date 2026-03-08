@@ -6,7 +6,7 @@ import { Search, Flame, Play, CheckCircle, Info, ArrowLeft, ExternalLink, Zap, S
 import Link from "next/link";
 import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+const API_BASE = '';
 
 interface Candidate {
     id: number;
