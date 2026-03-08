@@ -36,7 +36,7 @@ import Link from 'next/link';
 import { createClientComponentClient } from '@supabase/auth-helpers-nextjs';
 import { useRouter } from 'next/navigation';
 
-const API_BASE = '';
+const API_BASE = '/proxy';
 
 const ClipPlayer = memo(({ clip, transcript, preferredLanguage, authToken, API_BASE }: any) => {
     const inputProps = useMemo(() => ({

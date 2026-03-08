@@ -6,7 +6,7 @@ import { Search, Flame, Play, CheckCircle, Info, ArrowLeft, ExternalLink, Zap, S
 import Link from "next/link";
 import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
 
-const API_BASE = '';
+const API_BASE = '/proxy';
 
 interface Candidate {
     id: number;

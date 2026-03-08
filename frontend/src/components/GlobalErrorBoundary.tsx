@@ -3,7 +3,7 @@
 import React from 'react';
 import { ErrorView } from './ErrorView';
 
-const API_BASE = '';
+const API_BASE = '/proxy';
 
 const logErrorToBackend = async (error: any, context?: string) => {
     try {
