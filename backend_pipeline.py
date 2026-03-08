@@ -57,9 +57,17 @@ def download_video(url, output_path):
     try:
         video_title = None
         ydl_opts = {
-            # Simplest, most bulletproof fallback chain for formats (let FFmpeg handle the MP4 merging)
-            # We strictly limit height to 1440p to prevent 4K/8K from crashing the VPS RAM / Framing
-            'format': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]/best',
+            # Multi-level fallback, ALL options hard-capped at 1440p (no uncapped /best escape).
+            # This prevents 4K/8K downloads from crushing VPS RAM during framing analysis.
+            # Tries: split streams (any codec) -> single merged file -> same but uncapped as last resort but still sort-capped
+            'format': (
+                'bestvideo[height<=1440]+bestaudio'
+                '/bestvideo[height<=1080]+bestaudio'
+                '/best[height<=1440]'
+                '/best[height<=1080]'
+            ),
+            # Even if yt-dlp picks from the last fallback, prefer resolutions closest to 1440p
+            'format_sort': ['res:1440', '+size', '+br'],
             'merge_output_format': 'mp4',
             'outtmpl': output_path,
             'overwrites': True,
