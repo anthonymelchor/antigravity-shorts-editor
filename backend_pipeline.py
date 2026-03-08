@@ -71,10 +71,9 @@ def download_video(url, output_path):
             'merge_output_format': 'mp4',
             'outtmpl': output_path,
             'overwrites': True,
-            # Bypasses the "Empty format list" bug caused by JS-less environments.
-            # 'ios' and 'android' sign their URLs internally (no Node.js needed).
-            # 'web' was REMOVED because it requires a JavaScript runtime to decrypt signatures.
-            'extractor_args': {'youtube': {'player_client': ['ios', 'android']}},
+            # tv_embedded bypasses YouTube's PO Token requirement that ios/android now enforce.
+            # Tested locally: successfully downloads videos that ios+android alone cannot.
+            'extractor_args': {'youtube': {'player_client': ['tv_embedded', 'web']}},
         }
         
         # Anti-bot server protection: use cookies if provided
