@@ -5,6 +5,7 @@ import json
 import time
 import sys
 import logging
+import traceback
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -189,7 +190,9 @@ async def get_current_user(request: Request) -> str:
     
     # Verify token with Supabase Auth API
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        # March 2026: Hardened connection settings to avoid VPS deadlocks
+        timeout_cfg = httpx.Timeout(10.0, connect=5.0, read=5.0)
+        async with httpx.AsyncClient(timeout=timeout_cfg) as client:
             resp = await client.get(
                 f"{SUPABASE_URL}/auth/v1/user",
                 headers={
@@ -513,7 +516,15 @@ def run_pipeline(url: str, version: int, niche: Optional[str] = None, enable_bg_
         print(f"🧪 [MODO TEST] Saltando metadatos para input.mp4 local")
     else:
         try:
-            ydl_opts = {'quiet': True, 'no_warnings': True, 'noplaylist': True, 'socket_timeout': 10}
+            # March 2026: Super-Aggressive socket timeouts for metadata fetch
+            # This prevents the whole server from "hanging" if YouTube blocks the IP
+            ydl_opts = {
+                'quiet': True, 
+                'no_warnings': True, 
+                'noplaylist': True, 
+                'socket_timeout': 15,
+                'retries': 1,
+            }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 # We use download=False to just get metadata
                 info = ydl.extract_info(url, download=False)

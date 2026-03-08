@@ -4,15 +4,15 @@ pydantic==2.6.1
 httpx==0.27.0
 python-dotenv==1.0.1
 yt-dlp>=2025.10.07
-numpy==1.26.4
-opencv-python==4.9.0.80
-mediapipe==0.10.11
+numpy>=1.26.4
+opencv-python>=4.9.0.80
+mediapipe>=0.10.11
 av>=12.1.0
 faster-whisper>=1.1.1
-google-genai==0.3.0
-requests==2.31.0
-sqlalchemy==2.0.27
-python-multipart==0.0.9
-unidecode==1.3.8
+google-genai>=1.2.0
+requests>=2.31.0
+sqlalchemy>=2.0.27
+python-multipart>=0.0.9
+unidecode>=1.3.8
 # Optimization for Linux VPS:
 # nvidia-cudnn-cu12  # Install manually if GPU is available
