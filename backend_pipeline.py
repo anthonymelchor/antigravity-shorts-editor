@@ -62,37 +62,34 @@ def download_video(url, output_path):
             'merge_output_format': 'mp4',
             'outtmpl': output_path,
             'overwrites': True,
-            'quiet': True,
-            'no_warnings': True,
+            'quiet': False, # IMPORTANTE: Queremos ver el código de registro en los logs
+            'no_warnings': False,
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['android', 'ios'],
+                    'player_client': ['tv', 'android'], # TV es el más permisivo para OAuth
                     'player_skip': ['webpage', 'configs'],
                 }
             },
             'nocheckcertificate': True,
+            # ACTIVAR MODO OAUTH (La solución definitiva para VPS bloqueados)
+            'username': 'oauth',
+            'password': '', 
         }
         
-        # 1. First attempt: WITH cookies if available, otherwise standard
-        cookie_path = "cookies.txt"
-        if os.path.exists(cookie_path):
-            logger.info("Using cookies.txt for YouTube download...")
-            ydl_opts['cookiefile'] = cookie_path
-        
         try:
+            logger.info("Iniciando descarga con autenticación OAuth2...")
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 video_title = info.get('title') if info else None
-            logger.info(f"Video downloaded to {output_path} | Title: {video_title or 'Unknown'}")
+            logger.info(f"Video descargado: {video_title or 'Unknown'}")
             return output_path, video_title
             
-        except Exception as first_error:
-            # 2. Second attempt: Fallback to web client if mobile clients fail (less likely to work but good for coverage)
-            logger.warning(f"Mobile client download failed: {first_error}. Retrying with web client...")
-            ydl_opts['extractor_args']['youtube']['player_client'] = ['web']
-            del ydl_opts['extractor_args']['youtube']['player_skip']
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        except Exception as oauth_error:
+            logger.error(f"Error en descarga OAuth: {oauth_error}")
+            # Si falla OAuth, un último intento desesperado sin nada
+            logger.warning("Fallo OAuth. Reintentando sin ninguna configuración...")
+            ydl_opts_minimal = {'outtmpl': output_path, 'overwrites': True, 'format': 'best'}
+            with yt_dlp.YoutubeDL(ydl_opts_minimal) as ydl:
                 info = ydl.extract_info(url, download=True)
                 video_title = info.get('title') if info else None
             return output_path, video_title
