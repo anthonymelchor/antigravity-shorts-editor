@@ -57,7 +57,8 @@ def download_video(url, output_path):
     try:
         video_title = None
         ydl_opts = {
-            'format': 'bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440]+bestaudio/best[height<=1440]',
+            # Safest fallback chain: mp4+m4a -> any video+audio -> best single file -> absolute best
+            'format': 'bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1440]+bestaudio/best[height<=1440]/best',
             'merge_output_format': 'mp4',
             'outtmpl': output_path,
             'overwrites': True,
