@@ -157,7 +157,8 @@ export default function Home() {
             },
         });
         if (!res.ok) {
-            const text = await res.text();
+            // Clone the response so we don't consume the original body stream used by the caller
+            const text = await res.clone().text();
             console.error(`Fetch API Error [${res.status}]:`, text);
         }
         return res;
@@ -404,6 +405,9 @@ export default function Home() {
                 setCurrentVersion(String(data.version));
                 versionRef.current = String(data.version);
                 await fetchProjects();
+            } else {
+                setAlert({ msg: data.message || "Failed to start processing", type: 'error' });
+                setIsLaunching(false);
             }
 
             setView('dashboard');
@@ -1107,7 +1111,7 @@ export default function Home() {
                             className="w-full bg-transparent border-none px-20 py-10 text-xl font-medium outline-none placeholder:text-neutral-700 transition-all"
                             value={url}
                             onChange={(e) => setUrl(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && handleProcess()}
+                            onKeyDown={(e) => e.key === 'Enter' && url.trim() && setShowAnalyzeModal(true)}
                         />
                     </div>
 
