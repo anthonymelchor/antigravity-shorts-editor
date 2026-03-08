@@ -32,9 +32,9 @@ services:
     container_name: rocoto-frontend
     ports:
       - "3005:3000"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules # Prevenir que el node_modules local se pase al contenedor
+    # volumes:
+    #   - ./frontend:/app
+    #   - /app/node_modules # Prevenir que el node_modules local se pase al contenedor
     env_file:
       - .env
       - frontend/.env.local
