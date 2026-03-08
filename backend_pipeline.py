@@ -73,14 +73,28 @@ def download_video(url, output_path):
             'overwrites': True,
         }
         
-        # Anti-bot server protection: use cookies if provided
-        if os.path.exists("cookies.txt"):
-            ydl_opts['cookiefile'] = "cookies.txt"
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            video_title = info.get('title') if info else None
-        logger.info(f"Video downloaded to {output_path} | Title: {video_title or 'Unknown'}")
-        return output_path, video_title
+        # 1. First attempt: NO cookies. 
+        # YouTube blocks formats and requests PO Tokens fiercely if bots use logged-in cookies.
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                video_title = info.get('title') if info else None
+            logger.info(f"Video downloaded to {output_path} | Title: {video_title or 'Unknown'}")
+            return output_path, video_title
+            
+        except Exception as first_error:
+            # 2. Second attempt: WITH cookies (Fallback for Age-Restricted or completely blocked VPS IPs)
+            if os.path.exists("cookies.txt"):
+                logger.warning(f"Standard download failed. Bot-block detected or Age Restricted via {str(first_error)}. Retrying WITH cookies.txt...")
+                ydl_opts['cookiefile'] = "cookies.txt"
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    video_title = info.get('title') if info else None
+                logger.info(f"Video downloaded to {output_path} (via cookies fallback) | Title: {video_title or 'Unknown'}")
+                return output_path, video_title
+            else:
+                raise first_error
+
     except Exception as e:
         logger.error(f"Failed to download video: {str(e)}")
         raise e
