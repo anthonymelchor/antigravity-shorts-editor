@@ -43,7 +43,7 @@ async def health_check():
 @app.middleware("http")
 async def log_requests(request, call_next):
     try:
-        # print(f"[RAW-REQUEST] {request.method} {request.url}")  # Too noisy in prod
+        print(f"[RAW-REQUEST] {request.method} {request.url}") # Re-enabled for debugging
         response = await call_next(request)
         if response.status_code == 404:
             print(f"[404-DEBUG] Route not found: {request.url}")
