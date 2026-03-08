@@ -57,24 +57,28 @@ def download_video(url, output_path):
     try:
         video_title = None
         ydl_opts = {
-            # Multi-level fallback, ALL options hard-capped at 1440p (no uncapped /best escape).
-            # This prevents 4K/8K downloads from crushing VPS RAM during framing analysis.
-            # Tries: split streams (any codec) -> single merged file -> same but uncapped as last resort but still sort-capped
-            'format': (
-                'bestvideo[height<=1440]+bestaudio'
-                '/bestvideo[height<=1080]+bestaudio'
-                '/best[height<=1440]'
-                '/best[height<=1080]'
-            ),
-            # Even if yt-dlp picks from the last fallback, prefer resolutions closest to 1440p
-            'format_sort': ['res:1440', '+size', '+br'],
+            'format': 'bestvideo[height<=1440][ext=mp4]+bestaudio[ext=m4a]/best[height<=1440][ext=mp4]/best',
+            'format_sort': ['res:1440', 'ext:mp4:m4a'],
             'merge_output_format': 'mp4',
             'outtmpl': output_path,
             'overwrites': True,
+            'quiet': True,
+            'no_warnings': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'ios'],
+                    'player_skip': ['webpage', 'configs'],
+                }
+            },
+            'nocheckcertificate': True,
         }
         
-        # 1. First attempt: NO cookies. 
-        # YouTube blocks formats and requests PO Tokens fiercely if bots use logged-in cookies.
+        # 1. First attempt: WITH cookies if available, otherwise standard
+        cookie_path = "cookies.txt"
+        if os.path.exists(cookie_path):
+            logger.info("Using cookies.txt for YouTube download...")
+            ydl_opts['cookiefile'] = cookie_path
+        
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -83,17 +87,15 @@ def download_video(url, output_path):
             return output_path, video_title
             
         except Exception as first_error:
-            # 2. Second attempt: WITH cookies (Fallback for Age-Restricted or completely blocked VPS IPs)
-            if os.path.exists("cookies.txt"):
-                logger.warning(f"Standard download failed. Bot-block detected or Age Restricted via {str(first_error)}. Retrying WITH cookies.txt...")
-                ydl_opts['cookiefile'] = "cookies.txt"
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    video_title = info.get('title') if info else None
-                logger.info(f"Video downloaded to {output_path} (via cookies fallback) | Title: {video_title or 'Unknown'}")
-                return output_path, video_title
-            else:
-                raise first_error
+            # 2. Second attempt: Fallback to web client if mobile clients fail (less likely to work but good for coverage)
+            logger.warning(f"Mobile client download failed: {first_error}. Retrying with web client...")
+            ydl_opts['extractor_args']['youtube']['player_client'] = ['web']
+            del ydl_opts['extractor_args']['youtube']['player_skip']
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                video_title = info.get('title') if info else None
+            return output_path, video_title
 
     except Exception as e:
         logger.error(f"Failed to download video: {str(e)}")
