@@ -149,13 +149,18 @@ export default function Home() {
             router.push('/login');
             throw new Error('Not authenticated');
         }
-        return fetch(url, {
+        const res = await fetch(url, {
             ...options,
             headers: {
                 ...(options.headers || {}),
                 'Authorization': `Bearer ${session.access_token}`,
             },
         });
+        if (!res.ok) {
+            const text = await res.text();
+            console.error(`Fetch API Error [${res.status}]:`, text);
+        }
+        return res;
     };
 
     useEffect(() => {
@@ -282,6 +287,8 @@ export default function Home() {
             try {
                 const url = currentId ? `${API_BASE}/api/status?version=${currentId}` : `${API_BASE}/api/status`;
                 const res = await authFetch(url);
+                if (!res.ok) return; // Prevent crashing if server is down
+
                 const data = await res.json();
 
                 setStatus(prev => ({ ...prev, ...data }));
@@ -300,7 +307,7 @@ export default function Home() {
         };
 
         poll();
-        interval = setInterval(poll, 2500);
+        interval = setInterval(poll, 4000); // 4 Seconds is safer for prod
         return () => clearInterval(interval);
     }, [transcript?.version, view]);
 

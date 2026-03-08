@@ -42,11 +42,19 @@ async def health_check():
 
 @app.middleware("http")
 async def log_requests(request, call_next):
-    print(f"[RAW-REQUEST] {request.method} {request.url}")
-    response = await call_next(request)
-    if response.status_code == 404:
-        print(f"[404-DEBUG] Route not found: {request.url}")
-    return response
+    try:
+        # print(f"[RAW-REQUEST] {request.method} {request.url}")  # Too noisy in prod
+        response = await call_next(request)
+        if response.status_code == 404:
+            print(f"[404-DEBUG] Route not found: {request.url}")
+        return response
+    except Exception as e:
+        import traceback
+        error_msg = f"\n[CRITICAL-500] {time.ctime()} EXCEPTION AT {request.url}:\n{traceback.format_exc()}\n"
+        print(error_msg)
+        with open(APP_ERRORS_LOG, "a", encoding="utf-8") as f:
+            f.write(error_msg)
+        raise e # Let FastAPI handle the actual response
 
 # StaticFiles removed — media now served via authenticated /api/media endpoint
 
@@ -180,21 +188,29 @@ async def get_current_user(request: Request) -> str:
             del _auth_cache[token_key]
     
     # Verify token with Supabase Auth API
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(
-            f"{SUPABASE_URL}/auth/v1/user",
-            headers={
-                "apikey": SUPABASE_KEY,
-                "Authorization": f"Bearer {token}"
-            }
-        )
-        if resp.status_code != 200:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-        
-        user_data = resp.json()
-        user_id = user_data.get("id")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid user data in token")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/auth/v1/user",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {token}"
+                }
+            )
+            if resp.status_code != 200:
+                print(f"[AUTH] Failed to verify token: {resp.status_code} - {resp.text}")
+                raise HTTPException(status_code=401, detail="Invalid or expired token")
+            
+            user_data = resp.json()
+            user_id = user_data.get("id")
+            if not user_id:
+                raise HTTPException(status_code=401, detail="Invalid user data in token")
+    except httpx.ConnectError as ce:
+        print(f"[AUTH-CRITICAL] Cannot connect to Supabase: {ce}. Check your internet/DNS.")
+        raise HTTPException(status_code=500, detail="Supabase connection failed")
+    except Exception as e:
+        print(f"[AUTH-ERROR] Unexpected: {e}")
+        raise e
     
     # Cache the result
     _auth_cache[token_key] = (user_id, time.time() + AUTH_CACHE_TTL)
