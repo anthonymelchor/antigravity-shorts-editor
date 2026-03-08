@@ -13,8 +13,9 @@ COPY frontend/. .
 # 3. Construir bundle optimizado para producción
 RUN npm run build
 
-# 4. Exponer puerto del Frontend
+# 4. Configurar variables de entorno y exponer puerto
+ENV PORT=3000
+ENV HOSTNAME="0.0.0.0"
 EXPOSE 3000
-
 # 5. Comando para iniciar el Frontend en modo PRODUCCIÓN (sin badge de Next.js, menos RAM)
 CMD ["npm", "run", "start"]
