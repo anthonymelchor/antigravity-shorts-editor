@@ -10,11 +10,11 @@ RUN npm install
 # 2. Copiar el código
 COPY frontend/. .
 
-# 3. Construir para producción (opcional pero recomendado)
-# RUN npm run build
+# 3. Construir bundle optimizado para producción
+RUN npm run build
 
 # 4. Exponer puerto del Frontend
 EXPOSE 3000
 
-# 5. Comando para iniciar el Frontend
-CMD ["npm", "run", "dev"]
+# 5. Comando para iniciar el Frontend en modo PRODUCCIÓN (sin badge de Next.js, menos RAM)
+CMD ["npm", "run", "start"]
