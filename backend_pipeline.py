@@ -1131,7 +1131,7 @@ if __name__ == "__main__":
                     voice_path=A_OUT,
                     music_path=selected_music_path,
                     output_path=A_OUT,
-                    bg_volume=0.03
+                    bg_volume=0.025
                 )
                 if success:
                     logger.info(f"      ✅ Music mix applied successfully")

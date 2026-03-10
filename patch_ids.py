@@ -1,7 +1,0 @@
-content = open(r'frontend/src/app/page.tsx', 'rb').read().decode('utf-8')
-content = content.replace('id="playhead-line"', 'id="rct-playhead-line"')
-content = content.replace('id="playhead-label"', 'id="rct-playhead-label"')
-content = content.replace('id="playhead-input"', 'id="rct-playhead-input"')
-open(r'frontend/src/app/page.tsx', 'wb').write(content.encode('utf-8'))
-print('Done. frameupdate present:', 'frameupdate' in content)
-print('rct-playhead-line present:', 'rct-playhead-line' in content)
