@@ -65,6 +65,12 @@ def download_video(url, output_path):
             'outtmpl': output_path,
             'overwrites': True,
             'ffmpeg_location': ffmpeg_bin,
+            'retries': 15,
+            'fragment_retries': 15,
+            'socket_timeout': 60,
+            'javascript_runtime': 'node',
+            'http_chunk_size': 1048576,
+            'geo_bypass': True,
         }
         
         # Remove cookies for now to avoid 'n challenge' bot-detection failures

@@ -158,11 +158,14 @@ def download_video_sync(url, state):
             'progress_hooks': [progress_hook],
             'overwrites': True,
             'ffmpeg_location': ffmpeg_bin if os.path.exists(ffmpeg_bin) else None,
-            'retries': 5,
-            'fragment_retries': 5,
-            'socket_timeout': 10,
+            'retries': 15,
+            'fragment_retries': 15,
+            'socket_timeout': 60,
             'nocheckcertificate': True,
             'logger': YDLLogger(),
+            'javascript_runtime': 'node', # Especificar node para evitar avisos y mejorar extracción
+            'http_chunk_size': 1048576,    # Descargar en trozos de 1MB para mayor estabilidad
+            'geo_bypass': True,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
