@@ -503,7 +503,14 @@ def run_pipeline(url: str, version: int, niche: Optional[str] = None, enable_bg_
         print(f"🧪 [MODO TEST] Saltando metadatos para input.mp4 local")
     else:
         try:
-            ydl_opts = {'quiet': True, 'no_warnings': True, 'noplaylist': True, 'socket_timeout': 10}
+            node_path = os.getenv("NODE_PATH", "node")
+            ydl_opts = {
+                'quiet': True, 
+                'no_warnings': True, 
+                'noplaylist': True, 
+                'socket_timeout': 10,
+                'javascript_runtime': node_path
+            }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 # We use download=False to just get metadata
                 info = ydl.extract_info(url, download=False)

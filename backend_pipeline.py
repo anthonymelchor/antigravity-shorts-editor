@@ -45,7 +45,7 @@ if os.name == "nt":
     # Windows-only: add local WinGet FFmpeg to PATH if ffmpeg isn't already accessible
     import shutil as _shutil
     if not _shutil.which("ffmpeg"):
-        _ffmpeg_bin = r"C:\Users\MELCHOR\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin"
+        _ffmpeg_bin = os.getenv("FFMPEG_PATH", r"C:\Users\MELCHOR\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.WinGet.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin")
         if os.path.isdir(_ffmpeg_bin):
             os.environ["PATH"] = _ffmpeg_bin + os.pathsep + os.environ.get("PATH", "")
 # On Linux/Ubuntu: ffmpeg is expected to be installed system-wide (apt install ffmpeg)
@@ -56,21 +56,22 @@ def download_video(url, output_path):
     logger.info(f"Downloading video from {url}...")
     try:
         video_title = None
-        # Explicit ffmpeg location for yt-dlp to avoid 'format not available' errors due to merging failure
-        ffmpeg_bin = r"C:\Users\MELCHOR\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin"
+        ffmpeg_bin = os.getenv("FFMPEG_PATH", r"C:\Users\MELCHOR\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.WinGet.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin")
+        node_path = os.getenv("NODE_PATH", "node")
 
         ydl_opts = {
-            'format': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]/best',
+            'format': 'bestvideo[height<=1440][height>=1080]+bestaudio/best[height<=1440][height>=1080]/best',
             'merge_output_format': 'mp4',
             'outtmpl': output_path,
             'overwrites': True,
-            'ffmpeg_location': ffmpeg_bin,
-            'retries': 15,
-            'fragment_retries': 15,
+            'ffmpeg_location': ffmpeg_bin if os.path.exists(ffmpeg_bin) else None,
+            'retries': 20,
+            'fragment_retries': 20,
             'socket_timeout': 60,
-            'javascript_runtime': 'node',
+            'javascript_runtime': node_path,
             'http_chunk_size': 1048576,
             'geo_bypass': True,
+            'nocheckcertificate': True,
         }
         
         # Remove cookies for now to avoid 'n challenge' bot-detection failures

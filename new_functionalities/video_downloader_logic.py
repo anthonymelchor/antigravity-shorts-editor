@@ -7,6 +7,11 @@ import threading
 import unicodedata
 import re
 
+from dotenv import load_dotenv
+
+# Cargar .env
+load_dotenv()
+
 # Configuration
 BASE_DIR = os.getcwd()
 DOWNLOADS_DIR = os.path.join(os.path.expanduser("~"), "Downloads", "rocoto_videos")
@@ -146,26 +151,29 @@ def download_video_sync(url, state):
                     state.progress = float(p)
                 except: pass
 
-        ffmpeg_bin = r"C:\Users\MELCHOR\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.WinGet.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin"
+        ffmpeg_bin = os.getenv("FFMPEG_PATH", r"C:\Users\MELCHOR\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.WinGet.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin")
+        node_path = os.getenv("NODE_PATH", "node")
         
         # Sanitize title for Linux-friendly filename
         sanitized_title = sanitize_filename(state.title)
         
         ydl_opts = {
-            'format': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]/best',
+            'format': 'bestvideo[height<=1440][height>=1080]+bestaudio/best[height<=1440][height>=1080]/best',
             'merge_output_format': 'mp4',
             'outtmpl': os.path.join(DOWNLOADS_DIR, f'{sanitized_title}.%(ext)s'),
             'progress_hooks': [progress_hook],
             'overwrites': True,
             'ffmpeg_location': ffmpeg_bin if os.path.exists(ffmpeg_bin) else None,
-            'retries': 15,
-            'fragment_retries': 15,
+            'retries': 20,
+            'fragment_retries': 20,
             'socket_timeout': 60,
             'nocheckcertificate': True,
             'logger': YDLLogger(),
-            'javascript_runtime': 'node', # Especificar node para evitar avisos y mejorar extracción
+            'javascript_runtime': node_path, # Especificar ruta completa de node para evitar avisos y mejorar extracción
             'http_chunk_size': 1048576,    # Descargar en trozos de 1MB para mayor estabilidad
             'geo_bypass': True,
+            'quiet': False,                 # Activar algo de log para depuración
+            'no_warnings': False,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
